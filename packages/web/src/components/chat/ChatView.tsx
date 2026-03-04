@@ -1,10 +1,11 @@
 import { useRef, useEffect } from "react";
+import { AnimatePresence } from "framer-motion";
 import { useChatStore } from "@/stores/chat.store";
 import { useAuthStore } from "@/stores/auth.store";
 import { ChatBubble } from "./ChatBubble";
 import { ChatInput } from "./ChatInput";
 import { TypingIndicator } from "./TypingIndicator";
-import { QuickActions } from "./QuickActions";
+import { WelcomeScreen } from "./WelcomeScreen";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 export function ChatView() {
@@ -14,10 +15,8 @@ export function ChatView() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Single WebSocket connection for the entire chat
   const { sendMessage } = useWebSocket({ enabled: isAuthenticated });
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTo({
@@ -35,7 +34,17 @@ export function ChatView() {
     sendMessage(payload);
   };
 
-  const showQuickActions = messages.length <= 1;
+  // Show welcome screen when only the welcome message exists
+  const showWelcome = messages.length <= 1;
+
+  if (showWelcome) {
+    return (
+      <div className="flex h-full flex-col">
+        <WelcomeScreen actions={quickActions} onAction={handleQuickAction} />
+        <ChatInput onSend={handleSend} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -44,21 +53,16 @@ export function ChatView() {
         ref={scrollRef}
         className="scrollbar-hidden flex-1 overflow-y-auto px-4 py-4"
       >
-        <div className="mx-auto flex max-w-2xl flex-col gap-3">
-          {messages.map((msg) => (
-            <ChatBubble key={msg.id} message={msg} />
+        <div className="mx-auto flex max-w-2xl flex-col gap-4">
+          {messages.map((msg, i) => (
+            <ChatBubble key={msg.id} message={msg} index={i} />
           ))}
 
-          {isTyping && <TypingIndicator />}
+          <AnimatePresence>
+            {isTyping && <TypingIndicator />}
+          </AnimatePresence>
         </div>
       </div>
-
-      {/* Quick actions (shown only at start) */}
-      {showQuickActions && (
-        <div className="border-t border-white/5 px-4 py-3">
-          <QuickActions actions={quickActions} onAction={handleQuickAction} />
-        </div>
-      )}
 
       {/* Input area */}
       <ChatInput onSend={handleSend} />

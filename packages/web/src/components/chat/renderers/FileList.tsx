@@ -1,3 +1,4 @@
+import { motion } from "framer-motion";
 import type { FileInfo } from "@shared/types";
 import { FileText, Download, Image, FileSpreadsheet, File } from "lucide-react";
 
@@ -27,28 +28,30 @@ function formatSize(bytes: number): string {
 export function FileList({ files }: FileListProps) {
   return (
     <div className="mt-3 space-y-1.5">
-      {files.map((file) => {
+      {files.map((file, i) => {
         const Icon = getFileIcon(file.contentType);
         return (
-          <a
+          <motion.a
             key={file.id}
             href={file.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-3 rounded-xl border border-white/5 bg-surface-900/40 
-                       p-3 transition-all hover:border-brand-500/30 hover:bg-surface-800/60"
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.1 + i * 0.05, duration: 0.25 }}
+            className="card-hover flex items-center gap-3 p-3"
           >
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-600/20">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-600/15">
               <Icon className="h-4 w-4 text-brand-400" />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-medium text-white">{file.name}</p>
-              <p className="text-2xs text-surface-200/50">
+              <p className="truncate text-xs font-medium text-surface-100">{file.name}</p>
+              <p className="text-2xs text-surface-500">
                 {file.courseName} · {formatSize(file.size)}
               </p>
             </div>
-            <Download className="h-4 w-4 shrink-0 text-surface-200/30" />
-          </a>
+            <Download className="h-4 w-4 shrink-0 text-surface-600 transition-colors group-hover:text-surface-300" />
+          </motion.a>
         );
       })}
     </div>

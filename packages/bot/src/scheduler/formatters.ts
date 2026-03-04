@@ -1,4 +1,4 @@
-import type { Assignment, Announcement } from "../canvas/types";
+import type { Assignment, Announcement } from "@adiutask/core";
 
 export function formatAssignmentReminder(
   assignment: Assignment,

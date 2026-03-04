@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { Send } from "lucide-react";
+import { motion } from "framer-motion";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -14,7 +15,6 @@ export function ChatInput({ onSend }: ChatInputProps) {
     if (!trimmed) return;
     onSend(trimmed);
     setText("");
-    // Reset textarea height
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -29,16 +29,17 @@ export function ChatInput({ onSend }: ChatInputProps) {
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value);
-    // Auto-resize textarea
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
+  const hasText = text.trim().length > 0;
+
   return (
-    <div className="border-t border-white/5 bg-surface-900/60 px-4 py-3 pb-safe backdrop-blur-lg">
+    <div className="border-t border-white/[0.06] bg-surface-900/60 px-4 py-3 pb-safe backdrop-blur-xl">
       <div className="mx-auto flex max-w-2xl items-end gap-2">
-        <div className="relative flex-1">
+        <div className="card flex flex-1 items-end overflow-hidden">
           <textarea
             ref={inputRef}
             value={text}
@@ -46,22 +47,21 @@ export function ChatInput({ onSend }: ChatInputProps) {
             onKeyDown={handleKeyDown}
             placeholder="Escribe tu mensaje..."
             rows={1}
-            className="w-full resize-none rounded-2xl border border-surface-700 bg-surface-800/80 
-                       px-4 py-3 pr-12 text-sm text-white placeholder-surface-200/40
-                       outline-none transition-colors
-                       focus:border-brand-500/50 focus:ring-1 focus:ring-brand-500/25"
+            className="w-full resize-none bg-transparent px-4 py-3 text-sm text-white
+                       placeholder-surface-500 outline-none"
           />
+          <motion.button
+            onClick={handleSend}
+            disabled={!hasText}
+            whileTap={{ scale: 0.92 }}
+            className="mb-1.5 mr-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg
+                       bg-brand-600 text-white transition-all
+                       hover:bg-brand-500
+                       disabled:opacity-0 disabled:pointer-events-none"
+          >
+            <Send className="h-3.5 w-3.5" />
+          </motion.button>
         </div>
-        <button
-          onClick={handleSend}
-          disabled={!text.trim()}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl 
-                     bg-brand-600 text-white transition-all
-                     hover:bg-brand-500 active:scale-95
-                     disabled:opacity-30 disabled:hover:bg-brand-600"
-        >
-          <Send className="h-4 w-4" />
-        </button>
       </div>
     </div>
   );

@@ -3,19 +3,17 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "skipLibCheck": true,
+    "lib": ["ES2022"],
     "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun-types"],
-    "baseUrl": ".",
-    "paths": {
-      "@server/*": ["./server/*"],
-      "@shared/*": ["./shared/*"],
-      "@adiutask/core": ["../core/src/index.ts"]
-    }
+    "declaration": true,
+    "declarationMap": true
   },
-  "include": ["server", "shared"]
+  "include": ["src"],
+  "exclude": ["node_modules"]
 }

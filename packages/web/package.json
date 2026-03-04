@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
+    "@adiutask/core": "*",
     "@anthropic-ai/sdk": "^0.78.0",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",

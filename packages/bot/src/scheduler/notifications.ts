@@ -1,9 +1,9 @@
 import type { Api } from "grammy";
 import { config } from "../config";
 import { AppDatabase } from "../db/database";
-import { CanvasClient, TokenExpiredError } from "../canvas/client";
+import { CanvasClient, TokenExpiredError } from "@adiutask/core";
 import type { User } from "../db/schema";
-import type { Course } from "../canvas/types";
+import type { Course } from "@adiutask/core";
 import {
   formatAssignmentReminder,
   formatNewAnnouncement,

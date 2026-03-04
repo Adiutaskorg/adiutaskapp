@@ -7,7 +7,7 @@ import type {
   Announcement,
   CourseFile,
   CourseFolder,
-} from "./types";
+} from "../types/canvas";
 
 export class TokenExpiredError extends Error {
   constructor(message = "Canvas token expired or invalid") {
@@ -46,14 +46,44 @@ const CACHE_TTL: Record<string, number> = {
   getFolderSubfolders: 5 * 60 * 1000,
 };
 
+// --- Concurrency semaphore (Phase 6) ---
+
+class Semaphore {
+  private running = 0;
+  private queue: (() => void)[] = [];
+
+  constructor(private maxConcurrency: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.maxConcurrency) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => {
+        this.running++;
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
 export class CanvasClient {
   private baseUrl: string;
   private token: string;
   private cache = new Map<string, CacheEntry>();
+  private semaphore: Semaphore;
 
-  constructor(baseUrl: string, token: string) {
+  constructor(baseUrl: string, token: string, maxConcurrency = 4) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
+    this.semaphore = new Semaphore(maxConcurrency);
   }
 
   private getCached<T>(key: string, ttl: number): T | null {
@@ -76,13 +106,21 @@ export class CanvasClient {
   }
 
   private async request(path: string, retried = false): Promise<unknown> {
+    await this.semaphore.acquire();
+    try {
+      return await this._doRequest(path, retried);
+    } finally {
+      this.semaphore.release();
+    }
+  }
+
+  private async _doRequest(path: string, retried: boolean): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     const start = Date.now();
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${this.token}` },
     });
 
-    // Rate limit awareness
     const remaining = res.headers.get("X-Rate-Limit-Remaining");
     if (remaining && parseFloat(remaining) < 50) {
       console.log(`[CANVAS] Rate limit low (${remaining}), throttling`);
@@ -94,27 +132,24 @@ export class CanvasClient {
       return res.json();
     }
 
-    // 401 — token invalid/expired
     if (res.status === 401) {
       console.log(`[ERROR] Canvas 401 on ${path.split("?")[0]}`);
       throw new TokenExpiredError();
     }
 
-    // 403 rate limit — retry after header
     if (res.status === 403) {
       const retryAfter = res.headers.get("Retry-After");
       if (retryAfter && !retried) {
         console.log(`[CANVAS] Rate limited, retrying after ${retryAfter}s`);
         await sleep(parseFloat(retryAfter) * 1000);
-        return this.request(path, true);
+        return this._doRequest(path, true);
       }
     }
 
-    // 5xx — retry once after 2s
     if (res.status >= 500 && !retried) {
       console.log(`[ERROR] Canvas ${res.status} on ${path.split("?")[0]}, retrying...`);
       await sleep(2000);
-      return this.request(path, true);
+      return this._doRequest(path, true);
     }
 
     const body = await res.text().catch(() => "No response body");
@@ -356,7 +391,23 @@ export class CanvasClient {
     return result;
   }
 
-  // 13. Get single folder metadata
+  // 13. Download file contents (returns ArrayBuffer for cross-platform compatibility)
+  async downloadFile(fileId: number, fileMeta?: CourseFile): Promise<{ buffer: ArrayBuffer; name: string; size: number }> {
+    const file = fileMeta ?? await this.getFile(fileId);
+    const url = await this.getFileDownloadUrl(fileId);
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new CanvasAPIError(res.status, `Failed to download file: ${res.status}`);
+    }
+    const arrayBuffer = await res.arrayBuffer();
+    return {
+      buffer: arrayBuffer,
+      name: file.display_name,
+      size: file.size,
+    };
+  }
+
+  // 14. Get single folder metadata
   async getFolder(folderId: number): Promise<CourseFolder> {
     const f = (await this.request(`/api/v1/folders/${folderId}`)) as Record<string, unknown>;
     return {

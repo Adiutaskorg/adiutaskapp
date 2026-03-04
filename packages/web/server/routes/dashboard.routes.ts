@@ -3,7 +3,7 @@
 // Aggregated academic data for the dashboard view
 // ============================================
 
-import { CanvasClient } from "../canvas/client";
+import { CanvasClient } from "@adiutask/core";
 import { getUserCanvasToken } from "../db/database";
 
 const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL || "https://ufv-es.instructure.com";
@@ -35,55 +35,59 @@ export async function dashboardRoutes(
     const canvas = new CanvasClient(CANVAS_BASE_URL, canvasToken);
     const courses = await canvas.getCourses();
 
-    // Fetch pending assignments across all courses
-    const allAssignments: { id: string; name: string; courseName: string; dueAt: string | null; status: string }[] = [];
-    for (const c of courses) {
-      try {
+    // Fetch pending assignments across all courses (parallel)
+    const assignmentResults = await Promise.allSettled(
+      courses.map(async (c) => {
         const assignments = await canvas.getAssignments(c.id, true);
-        for (const a of assignments) {
+        return assignments.map((a) => {
           const isOverdue = a.due_at && new Date(a.due_at) < new Date();
-          allAssignments.push({
+          return {
             id: String(a.id),
             name: a.name,
             courseName: c.name,
             dueAt: a.due_at,
-            status: isOverdue ? "overdue" : "upcoming",
-          });
-        }
-      } catch {
-        // Skip courses with no assignments access
-      }
-    }
+            status: isOverdue ? "overdue" as const : "upcoming" as const,
+          };
+        });
+      })
+    );
+    type DashAssignment = { id: string; name: string; courseName: string; dueAt: string | null; status: "overdue" | "upcoming" };
+    const allAssignments: DashAssignment[] = assignmentResults
+      .filter((r): r is PromiseFulfilledResult<DashAssignment[]> => r.status === "fulfilled")
+      .flatMap((r) => r.value);
 
     // Sort by due date
-    allAssignments.sort((a, b) => {
+    allAssignments.sort((a: DashAssignment, b: DashAssignment) => {
       if (!a.dueAt) return 1;
       if (!b.dueAt) return -1;
       return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
     });
 
-    // Fetch grades
-    const recentGrades: { courseName: string; assignmentName: string; score: number | null; maxScore: number }[] = [];
-    for (const c of courses) {
-      try {
+    // Fetch grades (parallel)
+    const gradeResults = await Promise.allSettled(
+      courses.map(async (c) => {
         const grades = await canvas.getGrades(c.id);
         if (grades.current_score !== null) {
-          recentGrades.push({
+          return {
             courseName: grades.course_name || c.name,
             assignmentName: "Nota actual",
             score: grades.current_score,
             maxScore: 10,
-          });
+          };
         }
-      } catch {
-        // Skip courses without grades
-      }
-    }
+        return null;
+      })
+    );
+    type DashGrade = { courseName: string; assignmentName: string; score: number; maxScore: number };
+    const recentGrades: DashGrade[] = gradeResults
+      .filter((r): r is PromiseFulfilledResult<DashGrade> =>
+        r.status === "fulfilled" && r.value !== null)
+      .map((r) => r.value);
 
     return json({
       linked: true,
       courseCount: courses.length,
-      pendingCount: allAssignments.filter((a) => a.status === "upcoming").length,
+      pendingCount: allAssignments.filter((a: DashAssignment) => a.status === "upcoming").length,
       upcomingAssignments: allAssignments.slice(0, 10),
       recentGrades,
     });

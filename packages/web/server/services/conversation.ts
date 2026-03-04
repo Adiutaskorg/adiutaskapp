@@ -1,9 +1,7 @@
-/** Conversation message stored in memory for context resolution and LLM history */
-export interface ConversationMessage {
-  role: "user" | "assistant";
-  content: string;
-  created_at: string;
-}
+import type { ConversationMessage } from "@adiutask/core";
+
+// Re-export for backwards compatibility
+export type { ConversationMessage };
 
 const MAX_MESSAGES = 20;
 const TTL_MINUTES = 120;

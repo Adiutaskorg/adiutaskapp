@@ -1,6 +1,29 @@
-import type { Course } from "../canvas/types";
+import type { Course } from "../types/canvas";
 
-const BASE_PROMPT = `Eres UniBot, un asistente universitario para estudiantes de la UFV (Universidad Francisco de Vitoria).
+/**
+ * Builds the system prompt dynamically, injecting current date/time
+ * and optionally the student's cached courses for context.
+ *
+ * @param formatHint - Platform-specific formatting instructions
+ * @param cachedCourses - Optionally pre-fetched courses for context
+ */
+export function buildSystemPrompt(
+  formatHint: string,
+  linkHint: string,
+  cachedCourses?: Course[],
+): string {
+  const now = new Date();
+  const madridTime = now.toLocaleString("es-ES", {
+    timeZone: "Europe/Madrid",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  let prompt = `Eres UniBot, un asistente universitario para estudiantes de la UFV (Universidad Francisco de Vitoria).
 
 ## Personalidad
 - Eres cercano, motivador y con un toque de humor ligero. Como un compañero de clase que sabe mucho.
@@ -10,7 +33,7 @@ const BASE_PROMPT = `Eres UniBot, un asistente universitario para estudiantes de
 ## Reglas académicas (obligatorias)
 - Siempre respondes en español.
 - NUNCA inventas datos académicos. Si no tienes la info, dilo.
-- Si el usuario no tiene cuenta vinculada, guíale para hacerlo escribiendo "vincular".
+- ${linkHint}
 - Las fechas siempre en formato español (día/mes/año).
 - Zona horaria: Europe/Madrid.
 - Cuando listes tareas, ordena por fecha de entrega (más próxima primero).
@@ -18,10 +41,8 @@ const BASE_PROMPT = `Eres UniBot, un asistente universitario para estudiantes de
 - Si hay muchos resultados, muestra los 5 más relevantes y pregunta si quiere ver más.
 - Respuestas cortas: máximo 3-4 párrafos. Si necesitas más, pregunta si quiere detalles.
 
-## Formato Markdown
-- Usa **negrita** para énfasis.
-- Usa emojis como viñetas (📚, ✅, 📅, etc.).
-- NO uses markdown de enlaces [texto](url) a menos que sea un enlace real.
+## Formato
+${formatHint}
 
 ## Conversación con memoria
 - Recibes el historial reciente de la conversación. Úsalo para entender el contexto.
@@ -38,23 +59,6 @@ const BASE_PROMPT = `Eres UniBot, un asistente universitario para estudiantes de
 
 Tienes acceso a herramientas para consultar Canvas LMS: cursos, tareas, calificaciones, eventos, anuncios y archivos. Usa la herramienta adecuada según lo que pida el usuario.`;
 
-/**
- * Builds the system prompt dynamically, injecting current date/time
- * and optionally the student's cached courses for context.
- */
-export function buildSystemPrompt(cachedCourses?: Course[]): string {
-  const now = new Date();
-  const madridTime = now.toLocaleString("es-ES", {
-    timeZone: "Europe/Madrid",
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-
-  let prompt = BASE_PROMPT;
   prompt += `\n\n## Contexto actual\n- Fecha y hora en Madrid: ${madridTime}`;
 
   if (cachedCourses && cachedCourses.length > 0) {

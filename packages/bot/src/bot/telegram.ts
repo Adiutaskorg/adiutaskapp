@@ -1,12 +1,17 @@
 import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { config } from "../config";
-import { CanvasClient, TokenExpiredError, CanvasAPIError } from "../canvas/client";
+import {
+  CanvasClient, TokenExpiredError, CanvasAPIError,
+  routeCommand, type CommandResult,
+  telegramFormatter,
+  fileIcon,
+  resolveContext, setLastCourse,
+  type LLMProvider,
+} from "@adiutask/core";
 import { AppDatabase } from "../db/database";
-import { routeCommand, type CommandResult } from "../router/commands";
-import { formatFolderContents, fileIcon } from "../router/formatter";
-import { resolveContext } from "../router/context-resolver";
-import { type LLMProvider } from "../ai/llm";
 import { type ConversationStore } from "../db/conversation";
+
+const { formatFolderContents } = telegramFormatter;
 
 const WELCOME_MESSAGE = `👋 ¡Hola! Soy *UniBot*, tu asistente universitario de la UFV.
 
@@ -260,7 +265,7 @@ export function createBot(db: AppDatabase, llm: LLMProvider | null, conversation
 
     try {
       // TIER 1: Try command router (fast, no LLM)
-      const directResponse = await routeCommand(message, canvas);
+      const directResponse = await routeCommand(message, canvas, telegramFormatter, "🔗 Para vincular tu cuenta, usa /vincular y luego envía tu token de Canvas.", "Para desvincular tu cuenta, usa /desvincular");
       if (directResponse) {
         const text = getResultText(directResponse);
         conversation.addMessage(telegramId, "user", message);
@@ -272,9 +277,9 @@ export function createBot(db: AppDatabase, llm: LLMProvider | null, conversation
 
       // TIER 2: Context resolver — try to expand follow-ups using history
       if (history.length > 0) {
-        const expanded = resolveContext(message, history);
+        const expanded = resolveContext(message, history, telegramId);
         if (expanded) {
-          const resolvedResponse = await routeCommand(expanded, canvas);
+          const resolvedResponse = await routeCommand(expanded, canvas, telegramFormatter, "🔗 Para vincular tu cuenta, usa /vincular y luego envía tu token de Canvas.", "Para desvincular tu cuenta, usa /desvincular");
           if (resolvedResponse) {
             const text = getResultText(resolvedResponse);
             conversation.addMessage(telegramId, "user", message);
@@ -526,7 +531,7 @@ export function createBot(db: AppDatabase, llm: LLMProvider | null, conversation
       console.log(`[BOT] Downloading file ${fileId} (${file.display_name}) for user ${telegramId}`);
       const { buffer, name } = await canvas.downloadFile(fileId, file);
 
-      await ctx.replyWithDocument(new InputFile(buffer, name));
+      await ctx.replyWithDocument(new InputFile(Buffer.from(buffer), name));
       console.log(`[BOT] File ${fileId} sent to user ${telegramId}`);
     } catch (err) {
       await ctx.answerCallbackQuery().catch(() => {});

@@ -1,5 +1,5 @@
-import type { Course, CourseFile } from "../canvas/types";
-import { normalize } from "./normalizer";
+import type { Course, CourseFile } from "../types/canvas";
+import { normalize, levenshtein } from "./normalizer";
 
 const NOISE_WORDS = new Set([
   "la", "el", "los", "las", "mi", "mis", "del", "un", "una", "unos", "unas",
@@ -19,23 +19,20 @@ const TEMPORAL_SUFFIXES = [
 const COURSE_PREPS = ["de", "en", "para"];
 
 export function extractCourseName(normalized: string): string | null {
-  // Try each preposition
   for (const prep of COURSE_PREPS) {
-    // Find the last occurrence of " prep " to handle "fundamentos de ingeniería"
     const patterns = [` ${prep} `];
     for (const pat of patterns) {
       const idx = normalized.indexOf(pat);
       if (idx === -1) continue;
 
       let candidate = normalized.slice(idx + pat.length).trim();
-      // Remove temporal suffixes (e.g. "matematicas de mañana" → "matematicas")
+      // Remove temporal suffixes
       for (const suffix of TEMPORAL_SUFFIXES) {
         if (candidate.endsWith(suffix)) {
           candidate = candidate.slice(0, -suffix.length).trim();
           break;
         }
       }
-      // Remove trailing noise
       candidate = candidate.replace(/\s+$/, "");
       if (candidate.length === 0) continue;
 
@@ -95,15 +92,45 @@ export function findBestCourseMatch(courses: Course[], query: string): CourseMat
 
   if (scored.length === 1) return { type: "single", course: scored[0].course };
   if (scored.length > 1) {
-    // If top score is unique, take it
     if (scored[0].score > scored[1].score) return { type: "single", course: scored[0].course };
-    // Multiple with same score
     const topScore = scored[0].score;
     const tied = scored.filter((s) => s.score === topScore).map((s) => s.course);
     return { type: "multiple", courses: tied };
   }
 
-  // 5. Match by course code
+  // 5. Levenshtein fuzzy scoring (Phase 5): compare each query word against course name words
+  const fuzzyScored = courses
+    .map((c) => {
+      const cWords = normalize(c.name).split(" ").filter((w) => w.length > 0);
+      let score = 0;
+      for (const qw of qWords) {
+        if (qw.length < 3) continue;
+        for (const cw of cWords) {
+          if (cw.length < 3) continue;
+          const dist = levenshtein(qw, cw);
+          if (dist === 0) {
+            score += 3; // exact word match
+          } else if (dist <= 1) {
+            score += 2; // close match
+          } else if (dist <= 2 && qw.length >= 5) {
+            score += 1; // loose match for longer words
+          }
+        }
+      }
+      return { course: c, score };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (fuzzyScored.length === 1) return { type: "single", course: fuzzyScored[0].course };
+  if (fuzzyScored.length > 1) {
+    if (fuzzyScored[0].score > fuzzyScored[1].score) return { type: "single", course: fuzzyScored[0].course };
+    const topScore = fuzzyScored[0].score;
+    const tied = fuzzyScored.filter((s) => s.score === topScore).map((s) => s.course);
+    return { type: "multiple", courses: tied };
+  }
+
+  // 6. Match by course code
   const codeMatches = courses.filter((c) =>
     normalize(c.course_code).includes(q)
   );
@@ -121,10 +148,8 @@ const FILE_NOISE_WORDS = new Set([
 ]);
 
 const FILE_TRIGGER_WORDS = new Set([
-  // Action verbs
   "mandame", "enviame", "dame", "pasame", "manda", "envia",
   "descarga", "descargar", "bajar",
-  // Intent keywords
   "archivo", "archivos", "documento", "documentos", "pdf", "pdfs",
   "material", "materiales", "recurso", "recursos", "diapositiva",
   "diapositivas", "presentacion", "presentaciones", "slides", "ppt",
@@ -133,20 +158,15 @@ const FILE_TRIGGER_WORDS = new Set([
 ]);
 
 function normalizeFileName(name: string): string {
-  // Remove extension
   const noExt = name.replace(/\.[^.]+$/, "");
-  // Replace underscores, dashes, dots with spaces
   const spaced = noExt.replace(/[_\-.]+/g, " ");
   return normalize(spaced);
 }
 
 export function extractFileQuery(normalized: string, courseName: string | null): string {
   let words = normalized.split(" ").filter((w) => w.length > 0);
-  // Remove trigger words
   words = words.filter((w) => !FILE_TRIGGER_WORDS.has(w));
-  // Remove noise words
   words = words.filter((w) => !FILE_NOISE_WORDS.has(w));
-  // Remove course name words
   if (courseName) {
     const courseWords = new Set(normalize(courseName).split(" ").filter((w) => w.length > 0));
     words = words.filter((w) => !courseWords.has(w));
@@ -166,7 +186,26 @@ export function findBestFileMatch(files: CourseFile[], query: string): FileMatch
   const scored = files
     .map((f) => {
       const fNorm = normalizeFileName(f.display_name);
-      const score = qWords.filter((w) => fNorm.includes(w)).length;
+      const fWords = fNorm.split(" ").filter((w) => w.length > 0);
+      let score = 0;
+
+      for (const qw of qWords) {
+        // Exact substring match
+        if (fNorm.includes(qw)) {
+          score += 2;
+          continue;
+        }
+        // Levenshtein fuzzy match against file name words
+        if (qw.length >= 3) {
+          for (const fw of fWords) {
+            if (fw.length >= 3 && levenshtein(qw, fw) <= 1) {
+              score += 1;
+              break;
+            }
+          }
+        }
+      }
+
       return { file: f, score };
     })
     .filter((s) => s.score > 0)
@@ -175,7 +214,8 @@ export function findBestFileMatch(files: CourseFile[], query: string): FileMatch
   if (scored.length === 0) return { type: "none" };
 
   const topScore = scored[0].score;
-  if (topScore < 2) return { type: "none" };
+  // Lowered threshold from 2 to 1 (Phase 5)
+  if (topScore < 1) return { type: "none" };
 
   const tied = scored.filter((s) => s.score === topScore);
   if (tied.length === 1) return { type: "single", file: tied[0].file };

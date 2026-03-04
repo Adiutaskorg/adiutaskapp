@@ -1,20 +1,18 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { buildSystemPrompt } from "./system-prompt";
 import { CanvasClient, TokenExpiredError } from "../canvas/client";
-import type { ConversationMessage } from "../services/conversation";
-import type { Course } from "../canvas/types";
+import type { ConversationMessage } from "../types/conversation";
+import type { Course } from "../types/canvas";
 
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOOL_ITERATIONS = 8;
-const LLM_MAX_TOKENS = 2048;
 
 export interface LLMProvider {
   processMessage(message: string, canvas: CanvasClient, history?: ConversationMessage[]): Promise<string>;
 }
 
 /**
- * Ensures messages alternate between user and assistant roles,
- * as required by the Anthropic API. Merges consecutive same-role messages.
+ * Ensures messages alternate between user and assistant roles.
  */
 function ensureAlternation(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   if (messages.length === 0) return messages;
@@ -40,29 +38,38 @@ function ensureAlternation(messages: Anthropic.MessageParam[]): Anthropic.Messag
 }
 
 /**
- * Trims history to fit within a rough token budget.
- * Estimates ~4 chars per token. Keeps most recent messages.
+ * Better token estimation (Phase 7):
+ * ~5 chars/token for Spanish text, ~3.5 chars/token for JSON
  */
+function estimateCharsPerToken(content: string): number {
+  // Heuristic: if content looks like JSON (starts with [ or {), use lower ratio
+  const trimmed = content.trimStart();
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    return 3.5;
+  }
+  return 5; // Spanish text averages ~5 chars per token
+}
+
 function trimHistoryToTokenBudget(history: ConversationMessage[], budgetTokens: number): ConversationMessage[] {
-  const charBudget = budgetTokens * 4;
-  let totalChars = 0;
+  let totalTokens = 0;
   const result: ConversationMessage[] = [];
 
   for (let i = history.length - 1; i >= 0; i--) {
-    const msgChars = history[i].content.length;
-    if (totalChars + msgChars > charBudget) break;
-    totalChars += msgChars;
+    const charsPerToken = estimateCharsPerToken(history[i].content);
+    const msgTokens = Math.ceil(history[i].content.length / charsPerToken);
+    if (totalTokens + msgTokens > budgetTokens) break;
+    totalTokens += msgTokens;
     result.unshift(history[i]);
   }
 
   return result;
 }
 
-function buildMessages(userMessage: string, history?: ConversationMessage[]): Anthropic.MessageParam[] {
+function buildMessages(userMessage: string, maxTokens: number, history?: ConversationMessage[]): Anthropic.MessageParam[] {
   const messages: Anthropic.MessageParam[] = [];
 
   if (history && history.length > 0) {
-    const trimmed = trimHistoryToTokenBudget(history, Math.floor(LLM_MAX_TOKENS * 0.75));
+    const trimmed = trimHistoryToTokenBudget(history, Math.floor(maxTokens * 0.75));
     for (const msg of trimmed) {
       messages.push({ role: msg.role, content: msg.content });
     }
@@ -149,7 +156,6 @@ function compressToolResult(toolName: string, rawJson: string): string {
           }))
         );
       }
-
       case "get_assignments": {
         const assignments = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
@@ -160,11 +166,8 @@ function compressToolResult(toolName: string, rawJson: string): string {
           }))
         );
       }
-
-      case "get_grades": {
+      case "get_grades":
         return rawJson;
-      }
-
       case "get_upcoming_events": {
         const events = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
@@ -176,7 +179,6 @@ function compressToolResult(toolName: string, rawJson: string): string {
           }))
         );
       }
-
       case "get_announcements": {
         const anns = Array.isArray(data) ? data.slice(0, 10) : [];
         return JSON.stringify(
@@ -188,7 +190,6 @@ function compressToolResult(toolName: string, rawJson: string): string {
           }))
         );
       }
-
       case "get_course_files": {
         const files = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
@@ -199,7 +200,6 @@ function compressToolResult(toolName: string, rawJson: string): string {
           }))
         );
       }
-
       default:
         return rawJson;
     }
@@ -208,9 +208,22 @@ function compressToolResult(toolName: string, rawJson: string): string {
   }
 }
 
-// --- Tool execution ---
+// --- Tool execution with per-turn caching (Phase 7) ---
 
-async function executeTool(name: string, input: Record<string, unknown>, canvas: CanvasClient): Promise<string> {
+async function executeTool(
+  name: string,
+  input: Record<string, unknown>,
+  canvas: CanvasClient,
+  turnCache: Map<string, string>,
+): Promise<string> {
+  // Build cache key from tool name + input
+  const cacheKey = `${name}:${JSON.stringify(input)}`;
+  const cached = turnCache.get(cacheKey);
+  if (cached) {
+    console.log(`[AI] Tool cache hit: ${name}`);
+    return cached;
+  }
+
   console.log(`[AI] Tool call: ${name}`, Object.keys(input).length ? JSON.stringify(input) : "");
 
   let rawResult: string;
@@ -241,10 +254,11 @@ async function executeTool(name: string, input: Record<string, unknown>, canvas:
 
   const compressed = compressToolResult(name, rawResult);
   console.log(`[AI] Tool result compressed: ${rawResult.length} → ${compressed.length} chars`);
+  turnCache.set(cacheKey, compressed);
   return compressed;
 }
 
-// --- Try to get cached courses for the system prompt ---
+// --- Get cached courses for system prompt ---
 
 async function getCachedCourses(canvas: CanvasClient): Promise<Course[] | undefined> {
   try {
@@ -254,23 +268,36 @@ async function getCachedCourses(canvas: CanvasClient): Promise<Course[] | undefi
   }
 }
 
-// --- LLM provider ---
+// --- LLM providers ---
 
 export class ClaudeProvider implements LLMProvider {
   private client: Anthropic;
+  private maxTokens: number;
+  private formatHint: string;
+  private linkHint: string;
 
-  constructor(apiKey: string) {
+  constructor(
+    apiKey: string,
+    maxTokens = 2048,
+    formatHint = '- Usa **negrita** para énfasis.\n- Usa emojis como viñetas (📚, ✅, 📅, etc.).',
+    linkHint = 'Si el usuario no tiene cuenta vinculada, guíale para vincularla.',
+  ) {
     this.client = new Anthropic({ apiKey });
+    this.maxTokens = maxTokens;
+    this.formatHint = formatHint;
+    this.linkHint = linkHint;
   }
 
   async processMessage(userMessage: string, canvasClient: CanvasClient, history?: ConversationMessage[]): Promise<string> {
     const start = Date.now();
     console.log(`[AI] Processing message with Claude (history: ${history?.length ?? 0} msgs)`);
-    const messages = buildMessages(userMessage, history);
+    const messages = buildMessages(userMessage, this.maxTokens, history);
 
-    // Build dynamic system prompt with date and cached courses
     const cachedCourses = await getCachedCourses(canvasClient);
-    const systemPrompt = buildSystemPrompt(cachedCourses);
+    const systemPrompt = buildSystemPrompt(this.formatHint, this.linkHint, cachedCourses);
+
+    // Per-turn tool result cache (Phase 7)
+    const turnCache = new Map<string, string>();
 
     try {
       let iterations = 0;
@@ -279,7 +306,7 @@ export class ClaudeProvider implements LLMProvider {
         iterations++;
         const response = await this.client.messages.create({
           model: MODEL,
-          max_tokens: LLM_MAX_TOKENS,
+          max_tokens: this.maxTokens,
           system: systemPrompt,
           tools,
           messages,
@@ -301,11 +328,11 @@ export class ClaudeProvider implements LLMProvider {
           for (const block of response.content) {
             if (block.type !== "tool_use") continue;
             try {
-              const result = await executeTool(block.name, block.input as Record<string, unknown>, canvasClient);
+              const result = await executeTool(block.name, block.input as Record<string, unknown>, canvasClient, turnCache);
               toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
             } catch (err) {
               if (err instanceof TokenExpiredError) {
-                return "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **vincular** para actualizarlo.";
+                return "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso).";
               }
               toolResults.push({
                 type: "tool_result",
@@ -319,7 +346,6 @@ export class ClaudeProvider implements LLMProvider {
           continue;
         }
 
-        // Unexpected stop reason
         const text = response.content
           .filter((b): b is Anthropic.TextBlock => b.type === "text")
           .map((b) => b.text)
@@ -327,7 +353,6 @@ export class ClaudeProvider implements LLMProvider {
         return text || "No tengo respuesta para eso.";
       }
 
-      // Max iterations reached
       console.warn(`[AI] Max tool iterations (${MAX_TOOL_ITERATIONS}) reached after ${Date.now() - start}ms`);
       return "😅 Necesité demasiadas consultas para responder. ¿Puedes reformular tu pregunta de forma más concreta?";
     } catch (err) {
@@ -337,8 +362,13 @@ export class ClaudeProvider implements LLMProvider {
   }
 }
 
-export function createLLMProvider(): LLMProvider | null {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (anthropicKey) return new ClaudeProvider(anthropicKey);
+export function createLLMProvider(
+  apiKey?: string,
+  maxTokens = 2048,
+  formatHint?: string,
+  linkHint?: string,
+): LLMProvider | null {
+  const key = apiKey ?? process.env.ANTHROPIC_API_KEY;
+  if (key) return new ClaudeProvider(key, maxTokens, formatHint, linkHint);
   return null;
 }

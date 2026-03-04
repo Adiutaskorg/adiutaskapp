@@ -1,16 +1,6 @@
-export type Intent =
-  | { type: "courses" }
-  | { type: "assignments"; courseName?: string; onlyPending?: boolean }
-  | { type: "grades"; courseName?: string }
-  | { type: "calendar"; days?: number }
-  | { type: "announcements"; courseName?: string }
-  | { type: "files"; courseName?: string; fileExtension?: string }
-  | { type: "help" }
-  | { type: "greeting" }
-  | { type: "link_account" }
-  | { type: "unlink_account" }
-  | { type: "status" }
-  | { type: "unknown" };
+import type { Intent, ClassifyResult } from "../types/intent";
+export type { Intent, ClassifyResult } from "../types/intent";
+import { levenshtein } from "./normalizer";
 
 // A pattern matches if ANY of its keyword phrases are found in the message.
 // A keyword phrase matches if ALL words in it appear in the message.
@@ -53,8 +43,7 @@ function hasUrgency(normalized: string): boolean {
   return URGENCY_WORDS.some((w) => normalized.includes(w));
 }
 
-// Phrases that look like they might match an intent keyword but actually mean
-// something Canvas can't answer — should go to LLM (Tier 3)
+// Phrases that should go to LLM (Tier 3)
 const FILE_EXTENSION_MAP: [string[], string][] = [
   [["pdf", "pdfs"], ".pdf"],
   [["presentacion", "presentaciones", "diapositiva", "diapositivas", "slides", "ppt"], ".pptx,.ppt"],
@@ -75,13 +64,13 @@ function detectFileExtension(normalized: string): string | undefined {
 }
 
 const LLM_PHRASES = [
-  "que entra en",     // "qué entra en el examen" → exam content, not grades
-  "que cae en",       // "qué cae en el examen"
-  "como estudio",     // study tips
-  "como preparo",     // study tips
-  "consejos para",    // advice
+  "que entra en",
+  "que cae en",
+  "como estudio",
+  "como preparo",
+  "consejos para",
   "como me preparo",
-  "que temas",        // "qué temas entran"
+  "que temas",
   "que estudiar",
 ];
 
@@ -127,12 +116,11 @@ const PATTERNS: PatternDef[] = [
       "guia", "guias", "apuntes", "apunte", "temario", "syllabus",
       "programa", "descarga", "descargar", "bajar", "subido", "subidos",
       "fichero", "ficheros", "/archivos",
-      // Action verbs: "mandame el examen" → FILES (not GRADES)
       "mandame", "enviame", "dame", "pasame", "manda", "envia",
     ],
     build: (n) => ({ type: "files" as const, fileExtension: detectFileExtension(n) }),
   },
-  // ANNOUNCEMENTS — before assignments because "hay algo nuevo" must not match "hay algo"
+  // ANNOUNCEMENTS
   {
     type: "announcements",
     keywords: [
@@ -208,41 +196,129 @@ const PATTERNS: PatternDef[] = [
   },
 ];
 
-function phraseMatches(normalized: string, phrase: string): boolean {
+// --- Matching functions ---
+
+function phraseMatchesExact(normalized: string, phrase: string): boolean {
   const words = phrase.split(" ");
   if (words.length === 1) {
-    // Single word: check word boundary
     const re = new RegExp(`(?:^|\\s)${words[0]}(?:\\s|$)`);
     return re.test(normalized);
   }
-  // Multi-word phrase: all words must appear
   return words.every((w) => normalized.includes(w));
 }
 
+/**
+ * Fuzzy single-word match: checks if any word in the message is
+ * within Levenshtein distance <= 1 of the keyword (for words >= 4 chars).
+ */
+function phraseMatchesFuzzy(normalizedWords: string[], phrase: string): boolean {
+  const phraseWords = phrase.split(" ");
+  // Only fuzzy-match single-word keywords with length >= 4
+  if (phraseWords.length !== 1 || phraseWords[0].length < 4) return false;
+
+  const keyword = phraseWords[0];
+  return normalizedWords.some(
+    (w) => w.length >= 4 && levenshtein(w, keyword) <= 1 && w !== keyword
+  );
+}
+
+// --- Compound intent detection ---
+
+const COMPOUND_CONJUNCTIONS = [" y ", " e "];
+
+function splitCompoundMessage(normalized: string): string[] | null {
+  for (const conj of COMPOUND_CONJUNCTIONS) {
+    const idx = normalized.indexOf(conj);
+    if (idx === -1) continue;
+
+    const left = normalized.slice(0, idx).trim();
+    const right = normalized.slice(idx + conj.length).trim();
+    if (left.length > 0 && right.length > 0) {
+      return [left, right];
+    }
+  }
+  return null;
+}
+
+// --- Public API ---
+
+/**
+ * Classic single-intent classifier (backwards compatible).
+ */
 export function classifyIntent(normalized: string): Intent {
-  // If the message matches an LLM-only phrase, skip pattern matching entirely
   if (LLM_PHRASES.some((phrase) => normalized.includes(phrase))) {
     return { type: "unknown" };
   }
 
-  // Check if there's a greeting + another intent
   const hasGreeting = PATTERNS.find((p) => p.type === "greeting")!
-    .keywords.some((kw) => phraseMatches(normalized, kw));
+    .keywords.some((kw) => phraseMatchesExact(normalized, kw));
+
+  const normalizedWords = normalized.split(" ").filter((w) => w.length > 0);
 
   for (const pattern of PATTERNS) {
-    // Skip greeting on first pass if mixed with other content
     if (pattern.type === "greeting" && hasGreeting) continue;
 
     for (const kw of pattern.keywords) {
-      if (phraseMatches(normalized, kw)) {
+      if (phraseMatchesExact(normalized, kw)) {
+        if (pattern.build) return pattern.build(normalized);
+        return { type: pattern.type } as Intent;
+      }
+    }
+
+    // Fuzzy matching pass (Phase 3)
+    for (const kw of pattern.keywords) {
+      if (phraseMatchesFuzzy(normalizedWords, kw)) {
         if (pattern.build) return pattern.build(normalized);
         return { type: pattern.type } as Intent;
       }
     }
   }
 
-  // If only greeting matched
   if (hasGreeting) return { type: "greeting" };
-
   return { type: "unknown" };
+}
+
+/**
+ * Enhanced classifier that supports compound intents (Phase 3).
+ * Returns multiple intents for messages like "tareas y notas de física".
+ */
+export function classifyMessage(normalized: string): ClassifyResult {
+  // Try compound detection first
+  const parts = splitCompoundMessage(normalized);
+  if (parts) {
+    const intents: Intent[] = [];
+    let courseName: string | undefined;
+
+    for (const part of parts) {
+      const intent = classifyIntent(part);
+      if (intent.type !== "unknown") {
+        intents.push(intent);
+        // Extract course name from any part
+        if ("courseName" in intent && intent.courseName) {
+          courseName = intent.courseName;
+        }
+      }
+    }
+
+    // If the second part didn't have a course but the first did (or vice versa),
+    // share the course name
+    if (courseName && intents.length > 1) {
+      for (const intent of intents) {
+        if ("courseName" in intent && !intent.courseName) {
+          (intent as { courseName?: string }).courseName = courseName;
+        }
+      }
+    }
+
+    if (intents.length > 0) {
+      return { intents, courseName };
+    }
+  }
+
+  // Single intent
+  const intent = classifyIntent(normalized);
+  return {
+    intents: [intent],
+    courseName: "courseName" in intent ? (intent as { courseName?: string }).courseName : undefined,
+  };
 }

@@ -5,10 +5,13 @@
 // Tier 3: LLM fallback (Claude with tool use)
 // ============================================
 
-import { CanvasClient, TokenExpiredError } from "../canvas/client";
-import { routeCommand, type CommandResult } from "../router/commands";
-import { resolveContext } from "../router/context-resolver";
-import { createLLMProvider, type LLMProvider } from "../ai/llm";
+import {
+  CanvasClient, TokenExpiredError,
+  routeCommand, type CommandResult,
+  resolveContext, setLastCourse,
+  createLLMProvider, type LLMProvider,
+  htmlFormatter,
+} from "@adiutask/core";
 import { ConversationStore } from "./conversation";
 import { getUserCanvasToken, saveCanvasToken } from "../db/database";
 
@@ -16,7 +19,14 @@ const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL || "https://ufv-es.instructu
 
 // Shared instances
 const conversation = new ConversationStore();
-const llm = createLLMProvider();
+const llm = createLLMProvider(
+  undefined,
+  2048,
+  `- Usa **negrita** para énfasis.
+- Usa emojis como viñetas (📚, ✅, 📅, etc.).
+- NO uses markdown de enlaces [texto](url) a menos que sea un enlace real.`,
+  'Si el usuario no tiene cuenta vinculada, guíale para vincularla escribiendo "vincular".',
+);
 
 // Track users awaiting Canvas token input
 const awaitingToken = new Set<string>();
@@ -77,7 +87,11 @@ export async function processMessage(userId: string, message: string): Promise<B
 
   try {
     // ========== TIER 1: Command Router (keyword matching) ==========
-    const directResponse = await routeCommand(message, canvas);
+    const directResponse = await routeCommand(
+      message, canvas, htmlFormatter,
+      'Para vincular tu cuenta de Canvas, escribe **vincular** y luego envía tu token.',
+      'Para desvincular tu cuenta, escribe **desvincular**',
+    );
     if (directResponse) {
       const text = getResultText(directResponse);
       conversation.addMessage(userId, "user", message);
@@ -88,9 +102,13 @@ export async function processMessage(userId: string, message: string): Promise<B
 
     // ========== TIER 2: Context Resolver (follow-up expansion) ==========
     if (history.length > 0) {
-      const expanded = resolveContext(message, history);
+      const expanded = resolveContext(message, history, userId);
       if (expanded) {
-        const resolvedResponse = await routeCommand(expanded, canvas);
+        const resolvedResponse = await routeCommand(
+          expanded, canvas, htmlFormatter,
+          'Para vincular tu cuenta de Canvas, escribe **vincular** y luego envía tu token.',
+          'Para desvincular tu cuenta, escribe **desvincular**',
+        );
         if (resolvedResponse) {
           const text = getResultText(resolvedResponse);
           conversation.addMessage(userId, "user", message);
@@ -146,7 +164,6 @@ export async function processMessage(userId: string, message: string): Promise<B
 function handleNoToken(message: string, userId: string): BotResponse {
   const normalized = message.toLowerCase().trim();
 
-  // User wants to link their account
   if (normalized.includes("vincular") || normalized.includes("token") || normalized.includes("conectar")) {
     awaitingToken.add(userId);
     return {
@@ -159,7 +176,6 @@ function handleNoToken(message: string, userId: string): BotResponse {
     };
   }
 
-  // Greeting or help — respond but mention linking
   if (normalized.includes("hola") || normalized.includes("hey") || normalized.includes("buenas") ||
       normalized.includes("ayuda") || normalized.includes("help")) {
     return {
@@ -170,7 +186,6 @@ function handleNoToken(message: string, userId: string): BotResponse {
     };
   }
 
-  // Default: prompt to link
   return {
     text: "⚠️ No tienes tu cuenta de Canvas vinculada.\n\n" +
       "Necesito tu token para consultar tus datos. Escribe **\"vincular\"** para empezar.",
@@ -185,7 +200,6 @@ async function handleTokenValidation(userId: string, token: string): Promise<Bot
   try {
     const profile = await canvas.validateToken();
     await saveCanvasToken(userId, token);
-    // Cache the new client
     canvasClients.set(userId, canvas);
     console.log(`[BOT] User ${userId} linked Canvas account: ${profile.name}`);
     return {

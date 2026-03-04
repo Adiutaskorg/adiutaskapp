@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@adiutask/core": "*",
     "@anthropic-ai/sdk": "^0.78.0",
     "better-sqlite3": "^12.6.2",
     "dotenv": "^17.3.1",
