@@ -2,13 +2,13 @@ FROM oven/bun:1
 
 WORKDIR /app
 
-# Copy workspace root
-COPY package.json ./
+# Copy workspace root + all package.json files for install
+COPY package.json bun.lock* bunfig.toml* ./
 COPY packages/core/package.json packages/core/
 COPY packages/web/package.json packages/web/
 
-# Install dependencies
-RUN bun install --frozen-lockfile || bun install
+# Install all workspace dependencies
+RUN bun install
 
 # Copy source code
 COPY packages/core/ packages/core/
