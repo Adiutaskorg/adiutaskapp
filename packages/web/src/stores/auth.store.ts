@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { API_BASE } from "@/lib/api";
 
 interface User {
   id: string;
@@ -49,7 +50,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Clean the URL
       window.history.replaceState({}, "", window.location.pathname);
       try {
-        const res = await fetch("/api/auth/me", {
+        const res = await fetch(`${API_BASE}/api/auth/me`, {
           headers: { Authorization: `Bearer ${urlToken}` },
         });
         if (res.ok) {
@@ -66,7 +67,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const storedToken = localStorage.getItem(TOKEN_KEY);
     if (storedToken) {
       try {
-        const res = await fetch("/api/auth/me", {
+        const res = await fetch(`${API_BASE}/api/auth/me`, {
           headers: { Authorization: `Bearer ${storedToken}` },
         });
         if (res.ok) {

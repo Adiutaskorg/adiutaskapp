@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, useMotionValue, useTransform } from "framer-motion";
 import { useAuthStore } from "@/stores/auth.store";
+import { API_BASE } from "@/lib/api";
 import { DashboardSkeleton } from "@/components/ui/Skeleton";
 import {
   BookOpen,
@@ -61,7 +62,7 @@ export function DashboardView() {
   const fetchDashboard = useCallback(async (showLoader = true) => {
     if (showLoader) setLoading(true);
     try {
-      const res = await fetch("/api/dashboard", {
+      const res = await fetch(`${API_BASE}/api/dashboard`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {

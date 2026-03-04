@@ -41,7 +41,9 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
     intentionalClose.current = false;
 
     // Connect directly to backend — Vite proxy can be flaky for long-lived WS
-    const wsUrl = `ws://localhost:3000/ws?token=${currentToken}`;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsBase = import.meta.env.VITE_WS_URL || `${protocol}//${window.location.host}`;
+    const wsUrl = `${wsBase}/ws?token=${currentToken}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

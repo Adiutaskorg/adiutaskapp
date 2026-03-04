@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { GraduationCap, ArrowRight, User, BookOpen, Bell, Search, Sparkles } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
+import { API_BASE } from "@/lib/api";
 
 const FEATURES = [
   { icon: BookOpen, text: "Consulta tus notas al instante" },
@@ -38,7 +39,7 @@ export function LoginView() {
   const isNameValid = name.trim().length >= 2;
 
   const handleLogin = () => {
-    window.location.href = "/api/auth/login";
+    window.location.href = `${API_BASE}/api/auth/login`;
   };
 
   const handleDevLogin = async (e: React.FormEvent) => {
@@ -49,7 +50,7 @@ export function LoginView() {
     setError(null);
 
     try {
-      const res = await fetch("/api/auth/dev-login", {
+      const res = await fetch(`${API_BASE}/api/auth/dev-login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name.trim(), email }),

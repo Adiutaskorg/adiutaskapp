@@ -19,6 +19,7 @@ console.log(`🤖 UniBot server starting on port ${PORT}...`);
 
 Bun.serve({
   port: PORT,
+  hostname: "0.0.0.0",
 
   // --- HTTP Request Handler ---
   async fetch(req, server) {
@@ -85,7 +86,7 @@ function json(data: unknown, status = 200): Response {
 
 function corsHeaders(): Record<string, string> {
   return {
-    "Access-Control-Allow-Origin": process.env.NODE_ENV === "production" ? "https://unibot.ufv.es" : "*",
+    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || (process.env.NODE_ENV === "production" ? "https://unibot.ufv.es" : "*"),
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Credentials": "true",

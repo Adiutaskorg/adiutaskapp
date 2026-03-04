@@ -9,6 +9,7 @@
     "dev:server": "bun --watch server/index.ts",
     "build": "vite build",
     "preview": "vite preview",
+    "start": "bun server/index.ts",
     "db:seed": "bun server/db/seed.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit"
   },

@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from "react";
 import { useAuthStore } from "@/stores/auth.store";
+import { API_BASE } from "@/lib/api";
 
 interface UseNotificationsOptions {
   enabled: boolean;
@@ -45,7 +46,7 @@ export function useNotifications({ enabled }: UseNotificationsOptions) {
       }
 
       // Send subscription to backend
-      await fetch("/api/push/subscribe", {
+      await fetch(`${API_BASE}/api/push/subscribe`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
