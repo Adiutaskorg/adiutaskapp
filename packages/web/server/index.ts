@@ -44,6 +44,11 @@ Bun.serve({
       });
     }
 
+    // --- Health check (for Railway) ---
+    if (path === "/" || path === "/health") {
+      return json({ status: "ok", uptime: process.uptime() });
+    }
+
     // --- API Routes ---
     try {
       // Auth routes (public)
