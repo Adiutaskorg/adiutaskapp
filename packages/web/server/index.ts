@@ -12,10 +12,16 @@ import { initDatabase } from "./db/database";
 
 const PORT = Number(process.env.PORT) || 3000;
 
-// Initialize database
-await initDatabase();
-
 console.log(`🤖 UniBot server starting on port ${PORT}...`);
+console.log(`   DATABASE_URL=${process.env.DATABASE_URL || "(not set, using ./data/unibot.db)"}`);
+
+// Initialize database
+try {
+  await initDatabase();
+} catch (err) {
+  console.error("❌ Database init failed:", err);
+  process.exit(1);
+}
 
 Bun.serve({
   port: PORT,
