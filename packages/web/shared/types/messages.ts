@@ -66,12 +66,26 @@ export interface AssignmentInfo {
   submissionUrl?: string;
 }
 
+export type FileType =
+  | "pdf"
+  | "word"
+  | "excel"
+  | "powerpoint"
+  | "image"
+  | "video"
+  | "audio"
+  | "code"
+  | "archive"
+  | "other";
+
 export interface FileInfo {
   id: string;
   name: string;
-  courseName: string;
+  courseName?: string;
   size: number;
+  humanSize: string;
   contentType: string;
+  fileType: FileType;
   url: string;
   updatedAt: string;
 }

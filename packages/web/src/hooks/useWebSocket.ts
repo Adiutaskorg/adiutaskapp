@@ -25,9 +25,10 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
   const addMessage = useChatStore((s) => s.addMessage);
   const setTyping = useChatStore((s) => s.setTyping);
   const setConnected = useChatStore((s) => s.setConnected);
+  const setConnectionStatus = useChatStore((s) => s.setConnectionStatus);
 
-  const storeRef = useRef({ logout, addMessage, setTyping, setConnected });
-  storeRef.current = { logout, addMessage, setTyping, setConnected };
+  const storeRef = useRef({ logout, addMessage, setTyping, setConnected, setConnectionStatus });
+  storeRef.current = { logout, addMessage, setTyping, setConnected, setConnectionStatus };
 
   const connect = useCallback(() => {
     const currentToken = tokenRef.current;
@@ -39,6 +40,7 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
     }
 
     intentionalClose.current = false;
+    storeRef.current.setConnectionStatus("connecting");
 
     // Connect directly to backend — Vite proxy can be flaky for long-lived WS
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -49,7 +51,7 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
 
     ws.onopen = () => {
       console.log("[WS] Connected");
-      storeRef.current.setConnected(true);
+      storeRef.current.setConnectionStatus("connected");
       reconnectAttempts.current = 0;
     };
 
@@ -94,7 +96,7 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
     };
 
     ws.onclose = (event) => {
-      storeRef.current.setConnected(false);
+      storeRef.current.setConnectionStatus("disconnected");
 
       if (wsRef.current === ws) {
         wsRef.current = null;
@@ -112,6 +114,7 @@ export function useWebSocket({ enabled }: UseWebSocketOptions) {
 
       // Exponential backoff reconnection for unexpected disconnects
       if (enabledRef.current && reconnectAttempts.current < RATE_LIMITS.MAX_RECONNECT_ATTEMPTS) {
+        storeRef.current.setConnectionStatus("connecting");
         const delay = Math.min(
           RATE_LIMITS.RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts.current),
           RATE_LIMITS.MAX_RECONNECT_DELAY_MS

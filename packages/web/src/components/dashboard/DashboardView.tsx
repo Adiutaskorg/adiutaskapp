@@ -16,6 +16,7 @@ import {
   Inbox,
   FileQuestion,
   Link2,
+  Info,
 } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import { es } from "date-fns/locale";
@@ -37,6 +38,7 @@ interface DashboardData {
   }>;
   courseCount: number;
   pendingCount: number;
+  avgGradeOver10: number | null;
 }
 
 function getGreeting(): string {
@@ -132,12 +134,8 @@ export function DashboardView() {
     .filter((a) => a.status === "upcoming")
     .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime())[0];
 
-  const avgGrade = data?.recentGrades?.length
-    ? Math.round(
-        data.recentGrades.reduce((sum, g) => sum + (g.score / g.maxScore) * 100, 0) /
-          data.recentGrades.length
-      )
-    : null;
+  // Use server-computed average (already /10)
+  const avgGrade = data?.avgGradeOver10 ?? null;
 
   return (
     <div
@@ -209,11 +207,17 @@ export function DashboardView() {
             <motion.div variants={fadeUp} className="mb-5 grid grid-cols-2 gap-2.5">
               <StatCard icon={BookOpen} label="Cursos activos" value={data?.courseCount ?? 0} color="brand" />
               <StatCard icon={ClipboardList} label="Pendientes" value={data?.pendingCount ?? 0} color="warning" />
-              <StatCard icon={TrendingUp} label="Media" value={avgGrade !== null ? `${avgGrade}%` : "—"} color="success" />
+              <StatCard
+                icon={TrendingUp}
+                label="Media estimada"
+                value={avgGrade !== null ? `${avgGrade}/10` : "\u2014"}
+                color="success"
+                tooltip="Nota media aproximada basada en las calificaciones publicadas en Canvas"
+              />
               <StatCard
                 icon={Timer}
                 label="Próximo deadline"
-                value={nextDeadline ? formatDistanceToNow(new Date(nextDeadline.dueAt), { locale: es }) : "—"}
+                value={nextDeadline ? formatDistanceToNow(new Date(nextDeadline.dueAt), { locale: es }) : "\u2014"}
                 color="info"
                 small
               />
@@ -280,9 +284,16 @@ export function DashboardView() {
             <motion.section variants={fadeUp} className="pb-4">
               <SectionHeader
                 icon={TrendingUp}
-                title="Últimas calificaciones"
+                title="Calificaciones por asignatura"
                 count={data?.recentGrades.length}
               />
+              {/* Disclaimer */}
+              {data?.recentGrades.length ? (
+                <p className="mt-1.5 flex items-center gap-1 text-2xs text-surface-600">
+                  <Info className="h-3 w-3 shrink-0" />
+                  Nota estimada según las calificaciones publicadas en Canvas. La nota oficial puede variar.
+                </p>
+              ) : null}
               <div className="mt-3 space-y-2">
                 {data?.recentGrades.length ? (
                   data.recentGrades.map((g, i) => {
@@ -296,15 +307,13 @@ export function DashboardView() {
                       <motion.div key={i} variants={fadeUp} className="card p-3.5">
                         <div className="flex items-center justify-between mb-2.5">
                           <div className="min-w-0 flex-1 mr-3">
-                            <p className="truncate text-sm font-medium text-surface-100">{g.assignmentName}</p>
-                            <p className="text-2xs text-surface-500">{g.courseName}</p>
+                            <p className="truncate text-sm font-medium text-surface-100">{g.courseName}</p>
+                            <p className="text-2xs text-surface-500">{g.assignmentName}</p>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
-                            <span className="font-mono text-sm font-medium text-surface-300">
-                              {g.score}<span className="text-surface-600">/{g.maxScore}</span>
-                            </span>
-                            <span className={`rounded-lg px-2 py-0.5 text-xs font-bold ${textColor} bg-current/10`}>
-                              {pct}%
+                            <span className={`font-mono text-base font-bold ${textColor}`}>
+                              {g.score}
+                              <span className="text-surface-600 text-sm font-medium">/{g.maxScore}</span>
                             </span>
                           </div>
                         </div>
@@ -339,12 +348,14 @@ function StatCard({
   value,
   color,
   small,
+  tooltip,
 }: {
   icon: typeof BookOpen;
   label: string;
   value: number | string;
   color: "brand" | "warning" | "success" | "info";
   small?: boolean;
+  tooltip?: string;
 }) {
   const styles = {
     brand: { icon: "bg-brand-500/15 text-brand-400", value: "text-brand-300" },
@@ -354,7 +365,7 @@ function StatCard({
   };
 
   return (
-    <div className="card p-4 flex flex-col gap-3">
+    <div className="card p-4 flex flex-col gap-3" title={tooltip}>
       <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${styles[color].icon}`}>
         <Icon className="h-5 w-5" />
       </div>
@@ -381,6 +392,9 @@ function DeadlineCountdown({
   const remainingHours = diffHours % 24;
   const isUrgent = diffHours < 24;
   const progress = Math.max(0, Math.min(100, (diffHours / (7 * 24)) * 100));
+
+  // Human-readable deadline date: "lunes 10 de marzo, 23:59"
+  const readableDate = format(dueDate, "EEEE d 'de' MMMM, HH:mm", { locale: es });
 
   return (
     <div
@@ -420,10 +434,11 @@ function DeadlineCountdown({
         </div>
 
         <p className="text-sm font-medium text-surface-100 mb-0.5">{assignment.name}</p>
-        <p className="text-2xs text-surface-500 mb-3">{assignment.courseName}</p>
+        <p className="text-2xs text-surface-500">{assignment.courseName}</p>
+        <p className="text-2xs text-surface-400 mt-1 capitalize">{readableDate}</p>
 
         {/* Progress bar */}
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-800">
+        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-surface-800">
           <motion.div
             initial={{ width: "100%" }}
             animate={{ width: `${progress}%` }}

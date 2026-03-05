@@ -4,7 +4,7 @@
 // ============================================
 
 import { createJWT, verifyJWTToken } from "../middleware/auth.middleware";
-import { findOrCreateUser, getUserById } from "../db/database";
+import { findOrCreateUser, getUserById, removeCanvasToken } from "../db/database";
 
 const SSO_BASE_URL = process.env.SSO_BASE_URL || "https://sso.ufv.es";
 const SSO_CLIENT_ID = process.env.SSO_CLIENT_ID || "adiutask-app";
@@ -37,12 +37,16 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
       // Create JWT
       const token = await createJWT(user.id, user.email);
 
+      // Get full user data with hasCanvas
+      const fullUser = await getUserById(user.id);
+
       return json({
         token,
         user: {
           id: user.id,
           email: user.email,
           name: user.name,
+          hasCanvas: fullUser?.hasCanvas ?? false,
         },
       });
     } catch (err) {
@@ -144,8 +148,26 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
         id: user.id,
         email: user.email,
         name: user.name,
+        hasCanvas: user.hasCanvas,
       },
     });
+  }
+
+  // --- DELETE /api/auth/canvas → Unlink Canvas token ---
+  if (path === "/api/auth/canvas" && req.method === "DELETE") {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return json({ error: "Token no proporcionado" }, 401);
+    }
+
+    const token = authHeader.slice(7);
+    const payload = await verifyJWTToken(token);
+    if (!payload) {
+      return json({ error: "Token inválido o expirado" }, 401);
+    }
+
+    await removeCanvasToken(payload.userId);
+    return json({ ok: true });
   }
 
   // --- POST /api/auth/logout ---

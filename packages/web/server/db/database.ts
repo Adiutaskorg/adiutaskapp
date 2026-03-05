@@ -134,13 +134,20 @@ export async function findOrCreateUser(data: {
   return { id, email: data.email, name: data.name };
 }
 
-/** Get a user by ID */
-export async function getUserById(userId: string): Promise<{ id: string; email: string; name: string } | null> {
-  return db
-    .query<{ id: string; email: string; name: string }, [string]>(
-      "SELECT id, email, name FROM users WHERE id = ?"
+/** Get a user by ID (includes hasCanvas flag) */
+export async function getUserById(userId: string): Promise<{ id: string; email: string; name: string; hasCanvas: boolean } | null> {
+  const row = db
+    .query<{ id: string; email: string; name: string; canvas_token: string | null }, [string]>(
+      "SELECT id, email, name, canvas_token FROM users WHERE id = ?"
     )
-    .get(userId) ?? null;
+    .get(userId);
+  if (!row) return null;
+  return { id: row.id, email: row.email, name: row.name, hasCanvas: !!row.canvas_token };
+}
+
+/** Remove a user's Canvas token (unlink) */
+export async function removeCanvasToken(userId: string): Promise<void> {
+  db.run("UPDATE users SET canvas_token = NULL, updated_at = datetime('now') WHERE id = ?", [userId]);
 }
 
 /** Get a user's Canvas API token (decrypted if encryption is configured) */

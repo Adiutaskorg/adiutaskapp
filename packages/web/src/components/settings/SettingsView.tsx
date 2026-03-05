@@ -11,11 +11,17 @@ import {
   XCircle,
   Wifi,
   WifiOff,
+  Loader2,
   Info,
   Shield,
+  Unlink,
+  ExternalLink,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { useChatStore } from "@/stores/chat.store";
+import { API_BASE } from "@/lib/api";
+
+const CANVAS_SETTINGS_URL = "https://ufv-es.instructure.com/profile/settings";
 
 const stagger = {
   hidden: {},
@@ -29,8 +35,10 @@ const fadeUp = {
 
 export function SettingsView() {
   const user = useAuthStore((s) => s.user);
+  const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
-  const isConnected = useChatStore((s) => s.isConnected);
+  const updateUser = useAuthStore((s) => s.updateUser);
+  const connectionStatus = useChatStore((s) => s.connectionStatus);
   const [notifPermission, setNotifPermission] = useState(
     typeof Notification !== "undefined" ? Notification.permission : "default"
   );
@@ -42,8 +50,9 @@ export function SettingsView() {
     .slice(0, 2)
     .toUpperCase() ?? "?";
 
-  const hasCanvas = !!user?.canvasUserId;
+  const hasCanvas = !!user?.hasCanvas;
   const [showCanvasGuide, setShowCanvasGuide] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
 
   const handleRequestNotifications = useCallback(async () => {
     if (typeof Notification === "undefined") {
@@ -64,6 +73,24 @@ export function SettingsView() {
       alert("No se pudieron activar las notificaciones. Inténtalo desde la configuración del navegador.");
     }
   }, []);
+
+  const handleUnlinkCanvas = useCallback(async () => {
+    if (!confirm("¿Seguro que quieres desvincular Canvas? Tendrás que volver a conectar tu token.")) return;
+    setUnlinking(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/canvas`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        updateUser({ hasCanvas: false, canvasUserId: undefined });
+      }
+    } catch {
+      alert("Error al desvincular Canvas. Inténtalo de nuevo.");
+    } finally {
+      setUnlinking(false);
+    }
+  }, [token, updateUser]);
 
   return (
     <div className="scrollbar-hidden h-full overflow-y-auto px-4 py-5">
@@ -101,9 +128,10 @@ export function SettingsView() {
                     </span>
                   )
                 }
-                onClick={!hasCanvas ? () => setShowCanvasGuide(!showCanvasGuide) : undefined}
+                onClick={hasCanvas ? undefined : () => setShowCanvasGuide(!showCanvasGuide)}
               />
               <AnimatePresence>
+                {/* Canvas connection guide (when NOT linked) */}
                 {showCanvasGuide && !hasCanvas && (
                   <motion.div
                     initial={{ height: 0, opacity: 0 }}
@@ -116,17 +144,18 @@ export function SettingsView() {
                       <p className="text-sm font-medium text-surface-200">Para vincular Canvas:</p>
                       <ol className="list-decimal ml-4 space-y-2 text-sm text-surface-300">
                         <li>
-                          Entra en{" "}
+                          Abre{" "}
                           <a
-                            href="https://ufv-es.instructure.com/profile/settings"
+                            href={CANVAS_SETTINGS_URL}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-brand-400 underline underline-offset-2"
+                            className="inline-flex items-center gap-1 text-brand-400 underline underline-offset-2"
                           >
-                            Canvas → Configuración
+                            Canvas &rarr; Configuración
+                            <ExternalLink className="h-3 w-3" />
                           </a>
                         </li>
-                        <li>Baja hasta <strong className="text-surface-100">"Tokens de acceso"</strong></li>
+                        <li>Busca la sección <strong className="text-surface-100">"Tokens de acceso autorizados"</strong></li>
                         <li>Clic en <strong className="text-surface-100">"+ Nuevo token de acceso"</strong></li>
                         <li>Ponle nombre (ej: "adiutask") y genera el token</li>
                         <li>
@@ -137,6 +166,29 @@ export function SettingsView() {
                         </li>
                       </ol>
                     </div>
+                  </motion.div>
+                )}
+                {/* Canvas unlink option (when linked) */}
+                {hasCanvas && (
+                  <motion.div layout>
+                    <button
+                      type="button"
+                      onClick={handleUnlinkCanvas}
+                      disabled={unlinking}
+                      className="flex w-full items-center gap-3 px-4 py-3 text-left text-accent-danger transition-colors hover:bg-accent-danger/5 active:bg-accent-danger/10"
+                    >
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-danger/10">
+                        {unlinking ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-accent-danger" />
+                        ) : (
+                          <Unlink className="h-4 w-4 text-accent-danger" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-accent-danger">Desvincular Canvas</p>
+                        <p className="text-2xs text-surface-500 mt-0.5">Tendrás que reconectar tu token</p>
+                      </div>
+                    </button>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -171,12 +223,14 @@ export function SettingsView() {
                 onClick={notifPermission !== "granted" ? handleRequestNotifications : undefined}
               />
               <SettingRow
-                icon={isConnected ? Wifi : WifiOff}
+                icon={connectionStatus === "disconnected" ? WifiOff : Wifi}
                 label="Conexión"
                 description="Estado del servidor en tiempo real"
                 value={
-                  isConnected ? (
+                  connectionStatus === "connected" ? (
                     <StatusBadge type="success" label="Conectado" />
+                  ) : connectionStatus === "connecting" ? (
+                    <StatusBadge type="info" label="Conectando..." />
                   ) : (
                     <StatusBadge type="warning" label="Desconectado" />
                   )
@@ -262,22 +316,24 @@ function SettingRow({ icon: Icon, label, description, value, onClick }: SettingR
   );
 }
 
-function StatusBadge({ type, label }: { type: "success" | "warning" | "muted"; label: string }) {
+function StatusBadge({ type, label }: { type: "success" | "warning" | "info" | "muted"; label: string }) {
   const styles = {
     success: "bg-accent-success/10 text-accent-success",
     warning: "bg-accent-warning/10 text-accent-warning",
+    info: "bg-accent-info/10 text-accent-info",
     muted: "bg-surface-800 text-surface-500",
   };
   const icons = {
     success: CheckCircle,
     warning: XCircle,
+    info: Loader2,
     muted: XCircle,
   };
   const BadgeIcon = icons[type];
 
   return (
     <span className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-2xs font-medium ${styles[type]}`}>
-      <BadgeIcon className="h-3 w-3" />
+      <BadgeIcon className={`h-3 w-3 ${type === "info" ? "animate-spin" : ""}`} />
       {label}
     </span>
   );

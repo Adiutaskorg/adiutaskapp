@@ -8,7 +8,7 @@ export { CanvasClient, TokenExpiredError, CanvasAPIError } from "./canvas/client
 // AI
 export { buildSystemPrompt } from "./ai/system-prompt";
 export { ClaudeProvider, createLLMProvider } from "./ai/llm";
-export type { LLMProvider } from "./ai/llm";
+export type { LLMProvider, LLMResult, CollectedFile } from "./ai/llm";
 
 // Formatter utilities
 export { fileIcon, formatSize, relativeTime, formatDateShort, formatDateTime } from "./formatter/base";

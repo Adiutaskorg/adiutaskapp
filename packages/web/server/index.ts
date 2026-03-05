@@ -6,8 +6,9 @@
 import { authRoutes } from "./routes/auth.routes";
 import { dashboardRoutes } from "./routes/dashboard.routes";
 import { pushRoutes } from "./routes/push.routes";
+import { fileRoutes } from "./routes/file.routes";
 import { handleWebSocketUpgrade, websocketHandler } from "./websocket/ws.handler";
-import { verifyJWT } from "./middleware/auth.middleware";
+import { verifyJWT, verifyJWTToken } from "./middleware/auth.middleware";
 import { initDatabase } from "./db/database";
 import { rateLimit } from "./middleware/rate-limit";
 import { validateEnv } from "./config/env";
@@ -71,6 +72,25 @@ Bun.serve({
     try {
       if (path.startsWith("/api/auth")) {
         response = await authRoutes(req, url);
+      } else if (path.startsWith("/api/files")) {
+        // File proxy supports both Authorization header and ?token= query param
+        // (window.open can't set headers, so we accept token in URL)
+        const authResult = await verifyJWT(req);
+        let userId: string | null = null;
+        if (authResult.ok) {
+          userId = authResult.userId;
+        } else {
+          const qToken = url.searchParams.get("token");
+          if (qToken) {
+            const payload = await verifyJWTToken(qToken);
+            if (payload) userId = payload.userId;
+          }
+        }
+        if (!userId) {
+          response = json({ error: "No autorizado" }, 401);
+        } else {
+          response = await fileRoutes(req, url, userId);
+        }
       } else {
         const authResult = await verifyJWT(req);
         if (!authResult.ok) {

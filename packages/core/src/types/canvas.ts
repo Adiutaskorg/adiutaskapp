@@ -16,6 +16,7 @@ export interface Assignment {
   due_at: string | null;
   points_possible: number | null;
   submission_types: string[];
+  published: boolean;
   description: string | null;
   html_url: string | null;
   lock_at: string | null;

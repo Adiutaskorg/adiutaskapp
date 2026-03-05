@@ -24,7 +24,7 @@ function haptic(duration = 10) {
 export function AppLayout() {
   const user = useAuthStore((s) => s.user);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  const isConnected = useChatStore((s) => s.isConnected);
+  const connectionStatus = useChatStore((s) => s.connectionStatus);
   const clearMessages = useChatStore((s) => s.clearMessages);
   const location = useLocation();
   const navigate = useNavigate();
@@ -84,9 +84,19 @@ export function AppLayout() {
           </button>
           <div
             className={`h-2 w-2 rounded-full transition-colors ${
-              isConnected ? "bg-accent-success" : "bg-accent-warning animate-pulse-soft"
+              connectionStatus === "connected"
+                ? "bg-accent-success"
+                : connectionStatus === "connecting"
+                ? "bg-accent-warning animate-pulse-soft"
+                : "bg-accent-danger"
             }`}
-            title={isConnected ? "Conectado" : "Reconectando..."}
+            title={
+              connectionStatus === "connected"
+                ? "Conectado"
+                : connectionStatus === "connecting"
+                ? "Conectando..."
+                : "Desconectado"
+            }
           />
         </div>
 

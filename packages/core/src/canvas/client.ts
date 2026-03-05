@@ -204,6 +204,7 @@ export class CanvasClient {
         due_at: (a.due_at as string) ?? null,
         points_possible: (a.points_possible as number) ?? null,
         submission_types: (a.submission_types as string[]) ?? [],
+        published: (a.published as boolean) ?? true,
         description: (a.description as string) ?? null,
         html_url: (a.html_url as string) ?? null,
         lock_at: (a.lock_at as string) ?? null,

@@ -7,8 +7,23 @@ import type { Course } from "../types/canvas";
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOOL_ITERATIONS = 12;
 
+/** Raw file data collected during tool execution */
+export interface CollectedFile {
+  id: number;
+  name: string;
+  size: number;
+  contentType: string;
+  updatedAt: string;
+}
+
+export interface LLMResult {
+  text: string;
+  files: CollectedFile[];
+}
+
 export interface LLMProvider {
   processMessage(message: string, canvas: CanvasClient, history?: ConversationMessage[]): Promise<string>;
+  processMessageRich(message: string, canvas: CanvasClient, history?: ConversationMessage[]): Promise<LLMResult>;
 }
 
 /**
@@ -104,7 +119,7 @@ const tools: Anthropic.Tool[] = [
   {
     name: "get_grades",
     description:
-      "Obtiene las calificaciones del estudiante en un curso específico. Devuelve la nota actual (current_score), nota letra (current_grade) y nota final (final_score) si está disponible.",
+      "Obtiene las calificaciones del estudiante en un curso específico. Devuelve nota_sobre_10 (escala española), nota_porcentaje (0-100), nota_letra y nota_final. Muestra al usuario la nota sobre 10.",
     input_schema: {
       type: "object" as const,
       properties: { course_id: { type: "number", description: "ID del curso en Canvas" } },
@@ -179,6 +194,52 @@ const tools: Anthropic.Tool[] = [
   },
 ];
 
+// --- Date/grade formatting helpers for tool results ---
+
+const TZ = "Europe/Madrid";
+
+function fmtDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleString("es-ES", {
+      timeZone: TZ,
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function fmtDateShort(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  try {
+    return new Date(iso).toLocaleDateString("es-ES", {
+      timeZone: TZ,
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function fmtSize(bytes: unknown): string {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function stripHtml(html: string | null | undefined, maxLen = 500): string | null {
+  if (!html) return null;
+  return html.replace(/<[^>]*>/g, "").trim().slice(0, maxLen) || null;
+}
+
 // --- Tool result compression ---
 
 function compressToolResult(toolName: string, rawJson: string): string {
@@ -199,44 +260,45 @@ function compressToolResult(toolName: string, rawJson: string): string {
       case "get_assignments": {
         const assignments = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
-          assignments.map((a: Record<string, unknown>) => {
-            let desc = a.description as string | null;
-            if (desc) {
-              desc = desc.replace(/<[^>]*>/g, "").slice(0, 500);
-            }
-            return {
-              id: a.id,
-              name: a.name,
-              due: a.due_at,
-              points: a.points_possible,
-              types: a.submission_types,
-              url: a.html_url,
-              desc,
-              lock: a.lock_at,
-            };
-          })
+          assignments.map((a: Record<string, unknown>) => ({
+            id: a.id,
+            name: a.name,
+            due: fmtDate(a.due_at as string | null),
+            points: a.points_possible,
+            types: a.submission_types,
+            url: a.html_url,
+            desc: stripHtml(a.description as string | null),
+            lock: fmtDate(a.lock_at as string | null),
+          }))
         );
       }
-      case "get_grades":
+      case "get_grades": {
+        // Convert Canvas percentage to /10 for the LLM
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+          const g = data as Record<string, unknown>;
+          const score = g.current_score as number | null;
+          return JSON.stringify({
+            course_name: g.course_name,
+            nota_sobre_10: score !== null ? Math.round((score as number) / 10 * 10) / 10 : null,
+            nota_porcentaje: score,
+            nota_letra: g.current_grade,
+            nota_final: g.final_score,
+          });
+        }
         return rawJson;
+      }
       case "get_upcoming_events": {
         const events = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
-          events.map((e: Record<string, unknown>) => {
-            let desc = e.description as string | null;
-            if (desc) {
-              desc = desc.replace(/<[^>]*>/g, "").slice(0, 300);
-            }
-            return {
-              title: e.title,
-              start: e.start_at,
-              end: e.end_at,
-              course: e.course_name,
-              type: e.type,
-              desc,
-              location: e.location,
-            };
-          })
+          events.map((e: Record<string, unknown>) => ({
+            title: e.title,
+            start: fmtDate(e.start_at as string | null),
+            end: fmtDate(e.end_at as string | null),
+            course: e.course_name,
+            type: e.type,
+            desc: stripHtml(e.description as string | null, 300),
+            location: e.location,
+          }))
         );
       }
       case "get_announcements": {
@@ -244,8 +306,8 @@ function compressToolResult(toolName: string, rawJson: string): string {
         return JSON.stringify(
           anns.map((a: Record<string, unknown>) => ({
             title: a.title,
-            message: typeof a.message === "string" ? a.message.replace(/<[^>]*>/g, "").slice(0, 800) : a.message,
-            posted: a.posted_at,
+            message: stripHtml(a.message as string | null, 800),
+            posted: fmtDateShort(a.posted_at as string | null),
             course: a.course_name,
             url: a.url,
           }))
@@ -258,9 +320,9 @@ function compressToolResult(toolName: string, rawJson: string): string {
           files.map((f: Record<string, unknown>) => ({
             id: f.id,
             name: f.display_name,
-            size: f.size,
+            size: fmtSize(f.size),
             type: f.content_type,
-            updated: f.updated_at,
+            updated: fmtDateShort(f.updated_at as string | null),
           }))
         );
       }
@@ -294,6 +356,7 @@ async function executeTool(
   input: Record<string, unknown>,
   canvas: CanvasClient,
   turnCache: Map<string, string>,
+  collectedFiles?: CollectedFile[],
 ): Promise<string> {
   // Build cache key from tool name + input
   const cacheKey = `${name}:${JSON.stringify(input)}`;
@@ -343,6 +406,24 @@ async function executeTool(
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
 
+  // Collect raw file data for structured metadata
+  if (collectedFiles && (name === "get_course_files" || name === "get_folder_files")) {
+    try {
+      const files = JSON.parse(rawResult);
+      if (Array.isArray(files)) {
+        for (const f of files) {
+          collectedFiles.push({
+            id: f.id as number,
+            name: (f.display_name as string) ?? "",
+            size: (f.size as number) ?? 0,
+            contentType: (f.content_type as string) ?? "",
+            updatedAt: (f.updated_at as string) ?? "",
+          });
+        }
+      }
+    } catch { /* ignore parse errors */ }
+  }
+
   const compressed = compressToolResult(name, rawResult);
   console.log(`[AI] Tool result compressed: ${rawResult.length} → ${compressed.length} chars`);
   turnCache.set(cacheKey, compressed);
@@ -380,6 +461,15 @@ export class ClaudeProvider implements LLMProvider {
   }
 
   async processMessage(userMessage: string, canvasClient: CanvasClient, history?: ConversationMessage[]): Promise<string> {
+    const result = await this._process(userMessage, canvasClient, history);
+    return result.text;
+  }
+
+  async processMessageRich(userMessage: string, canvasClient: CanvasClient, history?: ConversationMessage[]): Promise<LLMResult> {
+    return this._process(userMessage, canvasClient, history);
+  }
+
+  private async _process(userMessage: string, canvasClient: CanvasClient, history?: ConversationMessage[]): Promise<LLMResult> {
     const start = Date.now();
     console.log(`[AI] Processing message with Claude (history: ${history?.length ?? 0} msgs)`);
     const messages = buildMessages(userMessage, this.maxTokens, history);
@@ -389,6 +479,7 @@ export class ClaudeProvider implements LLMProvider {
 
     // Per-turn tool result cache (Phase 7)
     const turnCache = new Map<string, string>();
+    const collectedFiles: CollectedFile[] = [];
 
     try {
       let iterations = 0;
@@ -409,7 +500,7 @@ export class ClaudeProvider implements LLMProvider {
             .map((b) => b.text)
             .join("\n");
           console.log(`[AI] Claude responded in ${Date.now() - start}ms (${iterations} iteration(s))`);
-          return text || "No tengo respuesta para eso.";
+          return { text: text || "No tengo respuesta para eso.", files: collectedFiles };
         }
 
         if (response.stop_reason === "tool_use") {
@@ -419,11 +510,11 @@ export class ClaudeProvider implements LLMProvider {
           for (const block of response.content) {
             if (block.type !== "tool_use") continue;
             try {
-              const result = await executeTool(block.name, block.input as Record<string, unknown>, canvasClient, turnCache);
+              const result = await executeTool(block.name, block.input as Record<string, unknown>, canvasClient, turnCache, collectedFiles);
               toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
             } catch (err) {
               if (err instanceof TokenExpiredError) {
-                return "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso).";
+                return { text: "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso).", files: [] };
               }
               toolResults.push({
                 type: "tool_result",
@@ -441,14 +532,14 @@ export class ClaudeProvider implements LLMProvider {
           .filter((b): b is Anthropic.TextBlock => b.type === "text")
           .map((b) => b.text)
           .join("\n");
-        return text || "No tengo respuesta para eso.";
+        return { text: text || "No tengo respuesta para eso.", files: collectedFiles };
       }
 
       console.warn(`[AI] Max tool iterations (${MAX_TOOL_ITERATIONS}) reached after ${Date.now() - start}ms`);
-      return "😅 Necesité demasiadas consultas para responder. ¿Puedes reformular tu pregunta de forma más concreta?";
+      return { text: "😅 Necesité demasiadas consultas para responder. ¿Puedes reformular tu pregunta de forma más concreta?", files: [] };
     } catch (err) {
       console.error(`[ERROR] Claude API failed after ${Date.now() - start}ms:`, (err as Error).message);
-      return "😅 Lo siento, estoy teniendo problemas técnicos. Inténtalo de nuevo en unos momentos.";
+      return { text: "😅 Lo siento, estoy teniendo problemas técnicos. Inténtalo de nuevo en unos momentos.", files: [] };
     }
   }
 }

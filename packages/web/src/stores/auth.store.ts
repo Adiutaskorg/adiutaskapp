@@ -7,6 +7,7 @@ interface User {
   name: string;
   avatarUrl?: string;
   canvasUserId?: number;
+  hasCanvas?: boolean;
 }
 
 interface AuthState {
@@ -18,6 +19,7 @@ interface AuthState {
   login: (token: string, user: User) => void;
   logout: () => void;
   setLoading: (loading: boolean) => void;
+  updateUser: (partial: Partial<User>) => void;
   /** Try to restore session from stored token */
   restoreSession: () => Promise<void>;
 }
@@ -41,6 +43,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   setLoading: (isLoading) => set({ isLoading }),
+
+  updateUser: (partial) =>
+    set((state) => ({
+      user: state.user ? { ...state.user, ...partial } : null,
+    })),
 
   restoreSession: async () => {
     // Check URL for token from SSO callback redirect

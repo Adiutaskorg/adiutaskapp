@@ -2,15 +2,19 @@ import { create } from "zustand";
 import type { ChatMessage, QuickAction } from "@shared/types";
 import { DEFAULT_QUICK_ACTIONS } from "@shared/constants";
 
+type ConnectionStatus = "connected" | "connecting" | "disconnected";
+
 interface ChatState {
   messages: ChatMessage[];
   isTyping: boolean;
   isConnected: boolean;
+  connectionStatus: ConnectionStatus;
   quickActions: QuickAction[];
 
   addMessage: (message: ChatMessage) => void;
   setTyping: (typing: boolean) => void;
   setConnected: (connected: boolean) => void;
+  setConnectionStatus: (status: ConnectionStatus) => void;
   setQuickActions: (actions: QuickAction[]) => void;
   clearMessages: () => void;
 }
@@ -28,6 +32,7 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [WELCOME_MESSAGE],
   isTyping: false,
   isConnected: false,
+  connectionStatus: "disconnected",
   quickActions: [...DEFAULT_QUICK_ACTIONS],
 
   addMessage: (message) =>
@@ -36,7 +41,16 @@ export const useChatStore = create<ChatState>((set) => ({
     })),
 
   setTyping: (isTyping) => set({ isTyping }),
-  setConnected: (isConnected) => set({ isConnected }),
+  setConnected: (isConnected) =>
+    set({
+      isConnected,
+      connectionStatus: isConnected ? "connected" : "disconnected",
+    }),
+  setConnectionStatus: (connectionStatus) =>
+    set({
+      connectionStatus,
+      isConnected: connectionStatus === "connected",
+    }),
   setQuickActions: (quickActions) => set({ quickActions }),
   clearMessages: () => set({ messages: [WELCOME_MESSAGE] }),
 }));

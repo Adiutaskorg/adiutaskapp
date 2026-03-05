@@ -5,10 +5,12 @@
 
 import {
   CanvasClient, TokenExpiredError,
-  createLLMProvider, type LLMProvider,
+  createLLMProvider, type LLMProvider, type CollectedFile,
 } from "@adiutask/core";
 import { ConversationStore } from "./conversation";
 import { getUserCanvasToken, saveCanvasToken } from "../db/database";
+import { getFileType, humanizeSize } from "@shared/file-utils";
+import type { FileInfo } from "@shared/types";
 
 const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL || "https://ufv-es.instructure.com";
 
@@ -46,6 +48,34 @@ const awaitingToken = new Set<string>();
 // Per-user Canvas client cache (avoids re-creating per message)
 const canvasClients = new Map<string, CanvasClient>();
 
+/** Clear cached Canvas client for a user (e.g. when unlinking) */
+export function clearCanvasClient(userId: string): void {
+  canvasClients.delete(userId);
+}
+
+// Canvas token regex: digits~alphanumeric(20+) — the real Canvas format
+const CANVAS_TOKEN_REGEX = /\d+~[A-Za-z0-9]{20,}/;
+// Fallback: any 40+ char alphanumeric+tilde string (for edge cases)
+const GENERIC_TOKEN_REGEX = /^[A-Za-z0-9~]{40,}$/;
+
+/**
+ * Extract a Canvas API token from a message.
+ * Handles: bare token, "mi token es X", "token: X", "aquí tienes X", etc.
+ * Returns the token string or null if no token found.
+ * NEVER passes token content to the LLM.
+ */
+function extractCanvasToken(message: string): string | null {
+  // Try the specific Canvas format first (most reliable)
+  const match = message.match(CANVAS_TOKEN_REGEX);
+  if (match) return match[0];
+
+  // If the whole message is a long alphanumeric string, treat as token
+  const trimmed = message.trim();
+  if (GENERIC_TOKEN_REGEX.test(trimmed)) return trimmed;
+
+  return null;
+}
+
 /** Result from the bot engine */
 export interface BotResponse {
   text: string;
@@ -54,21 +84,51 @@ export interface BotResponse {
   resolvedBy: "llm" | "system";
 }
 
+/** Convert collected raw files to FileInfo[] for the frontend */
+function buildFileInfos(files: CollectedFile[]): FileInfo[] {
+  // Deduplicate by id
+  const seen = new Set<number>();
+  const result: FileInfo[] = [];
+  for (const f of files) {
+    if (seen.has(f.id)) continue;
+    seen.add(f.id);
+    const ft = getFileType(f.contentType);
+    result.push({
+      id: String(f.id),
+      name: f.name,
+      size: f.size,
+      humanSize: humanizeSize(f.size),
+      contentType: f.contentType,
+      fileType: ft,
+      url: `/api/files/${f.id}/redirect`,
+      updatedAt: f.updatedAt,
+    });
+  }
+  return result;
+}
+
 /**
  * Process a user message — all queries go through the LLM.
  */
 export async function processMessage(userId: string, message: string): Promise<BotResponse> {
   const trimmed = message.trim();
 
-  // --- Token linking flow ---
-  if (awaitingToken.has(userId)) {
-    awaitingToken.delete(userId);
-    return await handleTokenValidation(userId, trimmed);
+  // --- Token detection (FIRST — intercept before anything, never pass to LLM) ---
+  const extractedToken = extractCanvasToken(trimmed);
+  if (extractedToken) {
+    awaitingToken.delete(userId); // clear awaiting state if present
+    console.log(`[BOT] Canvas token detected for user ${userId} (${extractedToken.slice(0, 4)}...)`);
+    return await handleTokenValidation(userId, extractedToken);
   }
 
-  // Auto-detect if message looks like a Canvas API token
-  if (trimmed.length > 50 && /^[A-Za-z0-9~]+$/.test(trimmed)) {
-    return await handleTokenValidation(userId, trimmed);
+  // --- Token linking flow (user was asked to paste token, but sent non-token text) ---
+  if (awaitingToken.has(userId)) {
+    awaitingToken.delete(userId);
+    return {
+      text: "❌ Eso no parece un token de Canvas. El token es una cadena larga de caracteres alfanuméricos.\n\nInténtalo de nuevo o escribe **\"vincular\"** para ver las instrucciones.",
+      resolvedBy: "system",
+      responseType: "error",
+    };
   }
 
   // --- Check Canvas token ---
@@ -90,10 +150,22 @@ export async function processMessage(userId: string, message: string): Promise<B
   try {
     // ========== LLM processing ==========
     console.log(`[BOT] LLM processing: "${trimmed.slice(0, 50)}"`);
-    const llmResponse = await getLLMProvider().processMessage(message, canvas, history);
+    const llm = getLLMProvider();
+    const result = await llm.processMessageRich(message, canvas, history);
     conversation.addMessage(userId, "user", message);
-    conversation.addMessage(userId, "assistant", llmResponse);
-    return { text: llmResponse, resolvedBy: "llm" };
+    conversation.addMessage(userId, "assistant", result.text);
+
+    // Build response with file metadata if files were collected
+    const response: BotResponse = { text: result.text, resolvedBy: "llm" };
+    if (result.files.length > 0) {
+      const fileInfos = buildFileInfos(result.files);
+      if (fileInfos.length > 0) {
+        response.responseType = "file_list";
+        response.metadata = { files: fileInfos };
+        console.log(`[BOT] Attached ${fileInfos.length} files to response`);
+      }
+    }
+    return response;
   } catch (err) {
     if (err instanceof TokenExpiredError) {
       canvasClients.delete(userId);
