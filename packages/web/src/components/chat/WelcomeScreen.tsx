@@ -16,7 +16,7 @@ const ACTION_COLORS: Record<string, string> = {
   assignments: "bg-accent-warning/15 text-accent-warning",
   grades: "bg-accent-success/15 text-accent-success",
   calendar: "bg-accent-info/15 text-accent-info",
-  announcements: "bg-purple-500/15 text-purple-400",
+  announcements: "bg-rose-500/15 text-rose-400",
 };
 
 interface WelcomeScreenProps {

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { GraduationCap, ArrowRight, User, BookOpen, Bell, Search, Sparkles } from "lucide-react";
+import { ArrowRight, User, BookOpen, Bell, Search, Sparkles } from "lucide-react";
 import { useAuthStore } from "@/stores/auth.store";
 import { API_BASE } from "@/lib/api";
 
@@ -100,9 +100,9 @@ export function LoginView() {
         {/* Logo */}
         <motion.div
           variants={fadeUp}
-          className="mx-auto mb-8 flex h-20 w-20 items-center justify-center rounded-3xl bg-brand-600 shadow-glow-brand"
+          className="mx-auto mb-8"
         >
-          <GraduationCap className="h-10 w-10 text-white" />
+          <img src="/logo.png" alt="adiutask" className="h-24 w-24 rounded-3xl shadow-glow-brand" />
         </motion.div>
 
         {/* Title */}

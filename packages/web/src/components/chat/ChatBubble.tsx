@@ -7,7 +7,7 @@ import { GradesTable } from "./renderers/GradesTable";
 import { AssignmentCard } from "./renderers/AssignmentCard";
 import { FileList } from "./renderers/FileList";
 import { clsx } from "clsx";
-import { AlertCircle, Bot } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { es } from "date-fns/locale";
 
@@ -41,9 +41,7 @@ export const ChatBubble = memo(function ChatBubble({ message, index = 0 }: ChatB
     >
       {/* Bot avatar */}
       {!isUser && (
-        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-600/20">
-          <Bot className="h-3.5 w-3.5 text-brand-400" />
-        </div>
+        <img src="/logo.png" alt="" className="mt-1 h-7 w-7 shrink-0 rounded-lg" />
       )}
 
       <div className={clsx("min-w-0", isUser ? "max-w-[80%]" : "max-w-[85%] flex-1")}>

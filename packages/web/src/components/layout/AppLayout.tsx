@@ -23,8 +23,15 @@ function haptic(duration = 10) {
 export function AppLayout() {
   const user = useAuthStore((s) => s.user);
   const isConnected = useChatStore((s) => s.isConnected);
+  const clearMessages = useChatStore((s) => s.clearMessages);
   const location = useLocation();
   const navigate = useNavigate();
+
+  const handleLogoClick = useCallback(() => {
+    haptic(6);
+    clearMessages();
+    navigate("/");
+  }, [clearMessages, navigate]);
 
   const initials = user?.name
     ?.split(" ")
@@ -64,9 +71,12 @@ export function AppLayout() {
       {/* Top bar — minimal */}
       <header className="flex items-center justify-between border-b border-white/[0.06] bg-surface-900/80 px-4 py-2.5 pt-safe backdrop-blur-xl">
         <div className="flex items-center gap-2.5">
-          <span className="font-display text-base font-bold text-white">
-            adiutask
-          </span>
+          <button type="button" onClick={handleLogoClick} className="flex items-center gap-2 transition-opacity active:opacity-70">
+            <img src="/logo.png" alt="" className="h-8 w-8 rounded-xl" />
+            <span className="font-display text-base font-bold bg-gradient-to-r from-cream-50 to-brand-300 bg-clip-text text-transparent">
+              adiutask
+            </span>
+          </button>
           <div
             className={`h-2 w-2 rounded-full transition-colors ${
               isConnected ? "bg-accent-success" : "bg-accent-warning animate-pulse-soft"
