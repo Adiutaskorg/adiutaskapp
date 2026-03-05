@@ -56,20 +56,25 @@ export function DashboardView() {
   const token = useAuthStore((s) => s.token);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const fetchDashboard = useCallback(async (showLoader = true) => {
     if (showLoader) setLoading(true);
+    setError(false);
     try {
       const res = await fetch(`${API_BASE}/api/dashboard`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         setData(await res.json());
+      } else {
+        setError(true);
       }
     } catch (err) {
-      console.error("Dashboard fetch failed:", err);
+      console.error("[Dashboard] Error al cargar:", err);
+      setError(true);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -151,6 +156,31 @@ export function DashboardView() {
       <div className="mx-auto max-w-2xl">
         {loading ? (
           <DashboardSkeleton />
+        ) : error ? (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-col items-center justify-center gap-4 py-20 text-center"
+          >
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-accent-danger/10">
+              <AlertTriangle className="h-7 w-7 text-accent-danger" />
+            </div>
+            <div>
+              <p className="font-display text-base font-semibold text-white">
+                No se pudo cargar el dashboard
+              </p>
+              <p className="mt-1 text-sm text-surface-400">
+                Comprueba tu conexión e inténtalo de nuevo.
+              </p>
+            </div>
+            <button
+              onClick={() => fetchDashboard()}
+              className="flex items-center gap-2 rounded-xl bg-brand-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-brand-500"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Reintentar
+            </button>
+          </motion.div>
         ) : (
           <motion.div variants={stagger} initial="hidden" animate="show">
             {/* Greeting */}

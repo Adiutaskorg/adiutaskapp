@@ -7,6 +7,7 @@ import { DashboardView } from "@/components/dashboard/DashboardView";
 import { SettingsView } from "@/components/settings/SettingsView";
 import { LoginView } from "@/components/auth/LoginView";
 import { InstallPrompt } from "@/components/ui/InstallPrompt";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { useNotifications } from "@/hooks/useNotifications";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -36,7 +37,7 @@ export default function App() {
   useNotifications({ enabled: isAuthenticated });
 
   return (
-    <>
+    <ErrorBoundary>
       <Routes>
         <Route path="/login" element={<LoginView />} />
         <Route
@@ -54,6 +55,6 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {isAuthenticated && <InstallPrompt />}
-    </>
+    </ErrorBoundary>
   );
 }

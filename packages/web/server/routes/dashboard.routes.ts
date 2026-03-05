@@ -14,7 +14,7 @@ export async function dashboardRoutes(
   userId: string
 ): Promise<Response> {
   if (req.method !== "GET") {
-    return json({ error: "Method not allowed" }, 405);
+    return json({ error: "Método no permitido" }, 405);
   }
 
   try {
@@ -93,7 +93,7 @@ export async function dashboardRoutes(
     });
   } catch (err) {
     console.error("[Dashboard] Error:", err);
-    return json({ error: "Failed to load dashboard data" }, 500);
+    return json({ error: "Error al cargar datos del dashboard" }, 500);
   }
 }
 

@@ -19,7 +19,7 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
   // --- POST /api/auth/dev-login → Development-only login ---
   if (path === "/api/auth/dev-login" && req.method === "POST") {
     if (!IS_DEV) {
-      return json({ error: "Dev login is only available in development mode" }, 403);
+      return json({ error: "Login de desarrollo solo disponible en modo desarrollo" }, 403);
     }
 
     try {
@@ -47,7 +47,7 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
       });
     } catch (err) {
       console.error("[Auth] Dev login error:", err);
-      return json({ error: "Dev login failed" }, 500);
+      return json({ error: "Error en login de desarrollo" }, 500);
     }
   }
 
@@ -123,20 +123,20 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
   if (path === "/api/auth/me" && req.method === "GET") {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader?.startsWith("Bearer ")) {
-      return json({ error: "No token provided" }, 401);
+      return json({ error: "Token no proporcionado" }, 401);
     }
 
     const token = authHeader.slice(7);
     const payload = await verifyJWTToken(token);
 
     if (!payload) {
-      return json({ error: "Invalid or expired token" }, 401);
+      return json({ error: "Token inválido o expirado" }, 401);
     }
 
     // Look up full user data from database
     const user = await getUserById(payload.userId);
     if (!user) {
-      return json({ error: "User not found" }, 404);
+      return json({ error: "Usuario no encontrado" }, 404);
     }
 
     return json({
@@ -153,7 +153,7 @@ export async function authRoutes(req: Request, url: URL): Promise<Response> {
     return json({ ok: true });
   }
 
-  return json({ error: "Auth route not found" }, 404);
+  return json({ error: "Ruta de autenticación no encontrada" }, 404);
 }
 
 function json(data: unknown, status = 200): Response {

@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
 import type { ChatMessage } from "@shared/types";
 import { GradesTable } from "./renderers/GradesTable";
 import { AssignmentCard } from "./renderers/AssignmentCard";
@@ -69,7 +70,7 @@ export const ChatBubble = memo(function ChatBubble({ message, index = 0 }: ChatB
             </p>
           ) : (
             <div className="markdown-content">
-              <ReactMarkdown>{message.content}</ReactMarkdown>
+              <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
             </div>
           )}
 

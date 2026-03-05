@@ -6,6 +6,7 @@
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync, existsSync } from "fs";
+import { encryptToken, decryptToken, isEncryptionConfigured } from "../lib/crypto";
 
 const DB_PATH = process.env.DATABASE_URL || "./data/unibot.db";
 
@@ -127,14 +128,27 @@ export async function getUserById(userId: string): Promise<{ id: string; email: 
     .get(userId) ?? null;
 }
 
-/** Get a user's Canvas API token */
+/** Get a user's Canvas API token (decrypted if encryption is configured) */
 export async function getUserCanvasToken(userId: string): Promise<string | null> {
   const row = db
     .query<{ canvas_token: string | null }, [string]>(
       "SELECT canvas_token FROM users WHERE id = ?"
     )
     .get(userId);
-  return row?.canvas_token ?? null;
+
+  const token = row?.canvas_token ?? null;
+  if (!token) return null;
+
+  // Decrypt if the token looks encrypted (contains ':' separator from AES-GCM format)
+  if (isEncryptionConfigured() && token.includes(":")) {
+    try {
+      return await decryptToken(token);
+    } catch {
+      // Fallback: might be a legacy plaintext token
+      return token;
+    }
+  }
+  return token;
 }
 
 /** Save a push notification subscription */
@@ -153,11 +167,15 @@ export async function deletePushSubscription(userId: string): Promise<void> {
   db.run("DELETE FROM push_subscriptions WHERE user_id = ?", [userId]);
 }
 
-/** Save or update a Canvas API token for a user */
+/** Save or update a Canvas API token for a user (encrypted if configured) */
 export async function saveCanvasToken(userId: string, canvasToken: string): Promise<void> {
+  const tokenToStore = isEncryptionConfigured()
+    ? await encryptToken(canvasToken)
+    : canvasToken;
+
   db.run(
     "UPDATE users SET canvas_token = ?, updated_at = datetime('now') WHERE id = ?",
-    [canvasToken, userId]
+    [tokenToStore, userId]
   );
 }
 

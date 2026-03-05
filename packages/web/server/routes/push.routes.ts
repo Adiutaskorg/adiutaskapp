@@ -20,7 +20,7 @@ export async function pushRoutes(
       return json({ ok: true });
     } catch (err) {
       console.error("[Push] Subscribe error:", err);
-      return json({ error: "Failed to save subscription" }, 500);
+      return json({ error: "Error al guardar la suscripción" }, 500);
     }
   }
 
@@ -31,11 +31,11 @@ export async function pushRoutes(
       return json({ ok: true });
     } catch (err) {
       console.error("[Push] Unsubscribe error:", err);
-      return json({ error: "Failed to remove subscription" }, 500);
+      return json({ error: "Error al eliminar la suscripción" }, 500);
     }
   }
 
-  return json({ error: "Push route not found" }, 404);
+  return json({ error: "Ruta de notificaciones no encontrada" }, 404);
 }
 
 function json(data: unknown, status = 200): Response {
