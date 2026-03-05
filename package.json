@@ -6,7 +6,6 @@
     "packages/*"
   ],
   "scripts": {
-    "dev:bot": "npm run dev -w packages/bot",
     "dev:web": "npm run dev -w packages/web",
     "build:web": "npm run build -w packages/web",
     "start": "bun packages/web/server/index.ts"

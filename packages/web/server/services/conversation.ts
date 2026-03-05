@@ -8,7 +8,7 @@ const TTL_MINUTES = 120;
 
 /**
  * In-memory conversation store for tracking chat history per user.
- * Used by Tier 2 (context resolver) and Tier 3 (LLM) for conversation continuity.
+ * Used by the LLM for conversation continuity.
  */
 export class ConversationStore {
   private cache = new Map<string, ConversationMessage[]>();

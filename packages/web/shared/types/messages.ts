@@ -39,7 +39,7 @@ export interface MessageMetadata {
   /** For quick_actions */
   actions?: QuickAction[];
   /** Which routing tier resolved this */
-  resolvedBy?: "keyword" | "fuzzy" | "context" | "llm" | "system";
+  resolvedBy?: "llm" | "system";
   /** Processing time in ms */
   processingTime?: number;
 }

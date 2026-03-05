@@ -22,7 +22,7 @@ interface AuthState {
   restoreSession: () => Promise<void>;
 }
 
-const TOKEN_KEY = "unibot_token";
+const TOKEN_KEY = "adiutask_token";
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,

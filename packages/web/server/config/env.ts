@@ -9,6 +9,11 @@ export function validateEnv() {
   const warnings: string[] = [];
   const errors: string[] = [];
 
+  // Anthropic API Key (required)
+  if (!process.env.ANTHROPIC_API_KEY) {
+    errors.push("ANTHROPIC_API_KEY no configurado — es obligatorio para el funcionamiento de adiutask");
+  }
+
   // JWT Secret
   const jwtSecret = process.env.JWT_SECRET || "";
   if (!jwtSecret || jwtSecret.includes("dev-") || jwtSecret.includes("change-me")) {
@@ -26,7 +31,12 @@ export function validateEnv() {
 
   // CORS
   if (!process.env.CORS_ORIGIN && IS_PROD) {
-    warnings.push("CORS_ORIGIN no configurado, usando default: https://unibot.ufv.es");
+    warnings.push("CORS_ORIGIN no configurado, usando default: https://adiutask.app");
+  }
+
+  // VAPID Keys (for push notifications)
+  if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    warnings.push("VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY no configurados — notificaciones push deshabilitadas");
   }
 
   // Encryption
@@ -39,7 +49,7 @@ export function validateEnv() {
 
   // Database
   if (!process.env.DATABASE_URL && IS_PROD) {
-    warnings.push("DATABASE_URL no configurado, usando ./data/unibot.db");
+    warnings.push("DATABASE_URL no configurado, usando ./data/adiutask.db");
   }
 
   // Print warnings

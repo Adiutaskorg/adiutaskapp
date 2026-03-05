@@ -10,8 +10,8 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "apple-touch-icon.png"],
       manifest: {
-        name: "UniBot — Tu asistente académico UFV",
-        short_name: "UniBot",
+        name: "adiutask — Tu asistente académico UFV",
+        short_name: "adiutask",
         description:
           "Accede a tus cursos, notas y entregas de Canvas LMS al instante",
         theme_color: "#1a1a2e",
@@ -43,7 +43,7 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/api\.unibot\.es\/.*$/,
+            urlPattern: /^https:\/\/api\.adiutask\.app\/.*$/,
             handler: "NetworkFirst",
             options: {
               cacheName: "api-cache",

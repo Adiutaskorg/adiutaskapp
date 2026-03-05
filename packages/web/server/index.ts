@@ -1,5 +1,5 @@
 // ============================================
-// UniBot Server — Bun
+// adiutask Server — Bun
 // HTTP API + WebSocket server
 // ============================================
 
@@ -11,6 +11,7 @@ import { verifyJWT } from "./middleware/auth.middleware";
 import { initDatabase } from "./db/database";
 import { rateLimit } from "./middleware/rate-limit";
 import { validateEnv } from "./config/env";
+import { NotificationScheduler } from "./services/notification-scheduler";
 
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -18,8 +19,8 @@ const IS_PROD = process.env.NODE_ENV === "production";
 // Validate environment variables
 validateEnv();
 
-console.log(`🤖 UniBot server starting on port ${PORT}...`);
-console.log(`   DATABASE_URL=${process.env.DATABASE_URL || "(not set, using ./data/unibot.db)"}`);
+console.log(`🤖 adiutask server starting on port ${PORT}...`);
+console.log(`   DATABASE_URL=${process.env.DATABASE_URL || "(not set, using ./data/adiutask.db)"}`);
 
 // Initialize database
 try {
@@ -28,6 +29,10 @@ try {
   console.error("❌ Database init failed:", err);
   process.exit(1);
 }
+
+// Start notification scheduler
+const notificationScheduler = new NotificationScheduler();
+notificationScheduler.start();
 
 Bun.serve({
   port: PORT,
@@ -95,7 +100,7 @@ Bun.serve({
   websocket: websocketHandler,
 });
 
-console.log(`✅ UniBot server running at http://localhost:${PORT}`);
+console.log(`✅ adiutask server running at http://localhost:${PORT}`);
 
 // --- Helpers ---
 
@@ -111,7 +116,7 @@ function json(data: unknown, status = 200): Response {
 
 function corsHeaders(): Record<string, string> {
   return {
-    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || (IS_PROD ? "https://unibot.ufv.es" : "*"),
+    "Access-Control-Allow-Origin": process.env.CORS_ORIGIN || (IS_PROD ? "https://adiutask.app" : "*"),
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Credentials": "true",

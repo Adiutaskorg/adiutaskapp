@@ -1,16 +1,11 @@
 // ============================================
-// Bot Engine — Real 3-tier routing
-// Tier 1: Keyword matching (routeCommand)
-// Tier 2: Context resolution (resolveContext)
-// Tier 3: LLM fallback (Claude with tool use)
+// Bot Engine — LLM-first architecture
+// All messages go directly through the LLM
 // ============================================
 
 import {
   CanvasClient, TokenExpiredError,
-  routeCommand, type CommandResult,
-  resolveContext, setLastCourse,
   createLLMProvider, type LLMProvider,
-  htmlFormatter,
 } from "@adiutask/core";
 import { ConversationStore } from "./conversation";
 import { getUserCanvasToken, saveCanvasToken } from "../db/database";
@@ -28,32 +23,32 @@ const llm = createLLMProvider(
   'Si el usuario no tiene cuenta vinculada, guíale para vincularla escribiendo "vincular".',
 );
 
+if (!llm) {
+  console.error("[BOT] FATAL: ANTHROPIC_API_KEY is required. Cannot start without LLM provider.");
+  process.exit(1);
+}
+
+// After the process.exit guard, llm is guaranteed to be non-null
+const llmProvider: LLMProvider = llm;
+
+console.log("[BOT] Claude LLM provider initialized");
+
 // Track users awaiting Canvas token input
 const awaitingToken = new Set<string>();
 
 // Per-user Canvas client cache (avoids re-creating per message)
 const canvasClients = new Map<string, CanvasClient>();
 
-if (llm) {
-  console.log("[BOT] Claude LLM provider initialized (Tier 3 enabled)");
-} else {
-  console.log("[BOT] No ANTHROPIC_API_KEY — Tier 3 (LLM) disabled, keyword + context only");
-}
-
 /** Result from the bot engine */
 export interface BotResponse {
   text: string;
   responseType?: string;
   metadata?: Record<string, unknown>;
-  resolvedBy: "keyword" | "context" | "llm" | "system";
-}
-
-function getResultText(result: CommandResult): string {
-  return typeof result === "string" ? result : result.text;
+  resolvedBy: "llm" | "system";
 }
 
 /**
- * Process a user message through the 3-tier routing system.
+ * Process a user message — all queries go through the LLM.
  */
 export async function processMessage(userId: string, message: string): Promise<BotResponse> {
   const trimmed = message.trim();
@@ -86,63 +81,14 @@ export async function processMessage(userId: string, message: string): Promise<B
   const history = conversation.getHistory(userId);
 
   try {
-    // ========== TIER 1: Command Router (keyword matching) ==========
-    const directResponse = await routeCommand(
-      message, canvas, htmlFormatter,
-      'Para vincular tu cuenta de Canvas, escribe **vincular** y luego envía tu token.',
-      'Para desvincular tu cuenta, escribe **desvincular**',
-    );
-    if (directResponse) {
-      const text = getResultText(directResponse);
-      conversation.addMessage(userId, "user", message);
-      conversation.addMessage(userId, "assistant", text);
-      console.log(`[BOT] Tier 1 response for user ${userId}`);
-      return { text, resolvedBy: "keyword" };
-    }
-
-    // ========== TIER 2: Context Resolver (follow-up expansion) ==========
-    if (history.length > 0) {
-      const expanded = resolveContext(message, history, userId);
-      if (expanded) {
-        const resolvedResponse = await routeCommand(
-          expanded, canvas, htmlFormatter,
-          'Para vincular tu cuenta de Canvas, escribe **vincular** y luego envía tu token.',
-          'Para desvincular tu cuenta, escribe **desvincular**',
-        );
-        if (resolvedResponse) {
-          const text = getResultText(resolvedResponse);
-          conversation.addMessage(userId, "user", message);
-          conversation.addMessage(userId, "assistant", text);
-          console.log(`[BOT] Tier 2 response for user ${userId} (expanded: "${expanded}")`);
-          return { text, resolvedBy: "context" };
-        }
-      }
-    }
-
-    // ========== TIER 3: LLM (Claude with Canvas tools) ==========
-    if (llm) {
-      console.log(`[BOT] Tier 3 — forwarding to LLM: "${trimmed.slice(0, 50)}"`);
-      const llmResponse = await llm.processMessage(message, canvas, history);
-      conversation.addMessage(userId, "user", message);
-      conversation.addMessage(userId, "assistant", llmResponse);
-      console.log(`[BOT] Tier 3 response for user ${userId}`);
-      return { text: llmResponse, resolvedBy: "llm" };
-    }
-
-    // ========== Fallback — no LLM, unrecognized ==========
-    return {
-      text: "🤔 No entendí tu pregunta. Prueba con:\n\n" +
-        "📚 **\"mis cursos\"** — Ver tus cursos\n" +
-        "📝 **\"tareas\"** — Tareas pendientes\n" +
-        "📊 **\"notas\"** — Calificaciones\n" +
-        "📅 **\"calendario\"** — Próximos eventos\n" +
-        "📢 **\"anuncios\"** — Anuncios recientes\n" +
-        "📁 **\"archivos de [curso]\"** — Material del curso",
-      resolvedBy: "system",
-    };
+    // ========== LLM processing ==========
+    console.log(`[BOT] LLM processing: "${trimmed.slice(0, 50)}"`);
+    const llmResponse = await llmProvider.processMessage(message, canvas, history);
+    conversation.addMessage(userId, "user", message);
+    conversation.addMessage(userId, "assistant", llmResponse);
+    return { text: llmResponse, resolvedBy: "llm" };
   } catch (err) {
     if (err instanceof TokenExpiredError) {
-      // Clear cached client
       canvasClients.delete(userId);
       return {
         text: "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
@@ -179,7 +125,7 @@ function handleNoToken(message: string, userId: string): BotResponse {
   if (normalized.includes("hola") || normalized.includes("hey") || normalized.includes("buenas") ||
       normalized.includes("ayuda") || normalized.includes("help")) {
     return {
-      text: "👋 **¡Hola! Soy UniBot**, tu asistente para Canvas UFV.\n\n" +
+      text: "👋 **¡Hola! Soy adiutask**, tu asistente para Canvas UFV.\n\n" +
         "Para empezar, necesitas vincular tu cuenta de Canvas.\n" +
         "Escribe **\"vincular\"** para conectar tu cuenta.",
       resolvedBy: "system",

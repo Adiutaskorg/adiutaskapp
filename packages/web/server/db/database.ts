@@ -8,7 +8,7 @@ import { join } from "path";
 import { mkdirSync, existsSync } from "fs";
 import { encryptToken, decryptToken, isEncryptionConfigured } from "../lib/crypto";
 
-const DB_PATH = process.env.DATABASE_URL || "./data/unibot.db";
+const DB_PATH = process.env.DATABASE_URL || "./data/adiutask.db";
 
 let db: Database;
 
@@ -72,8 +72,23 @@ export async function initDatabase(): Promise<void> {
   `);
 
   db.run(`
-    CREATE INDEX IF NOT EXISTS idx_chat_history_user 
+    CREATE INDEX IF NOT EXISTS idx_chat_history_user
     ON chat_history(user_id, created_at DESC)
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sent_notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      sent_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_sent_notifications_lookup
+    ON sent_notifications(user_id, type, reference_id)
   `);
 
   console.log("📦 Database initialized");
@@ -205,9 +220,61 @@ export async function saveChatMessage(
 export async function getChatHistory(userId: string, limit = 50) {
   return db
     .query(
-      `SELECT id, role, content, response_type, metadata, created_at 
-       FROM chat_history WHERE user_id = ? 
+      `SELECT id, role, content, response_type, metadata, created_at
+       FROM chat_history WHERE user_id = ?
        ORDER BY created_at DESC LIMIT ?`
     )
     .all(userId, limit);
+}
+
+/** Check if a notification has already been sent */
+export function hasNotificationBeenSent(userId: string, type: string, referenceId: string): boolean {
+  const row = db
+    .query<{ cnt: number }, [string, string, string]>(
+      "SELECT COUNT(*) as cnt FROM sent_notifications WHERE user_id = ? AND type = ? AND reference_id = ?"
+    )
+    .get(userId, type, referenceId);
+  return (row?.cnt ?? 0) > 0;
+}
+
+/** Mark a notification as sent */
+export function markNotificationSent(userId: string, type: string, referenceId: string): void {
+  db.run(
+    "INSERT INTO sent_notifications (user_id, type, reference_id) VALUES (?, ?, ?)",
+    [userId, type, referenceId]
+  );
+}
+
+/** Remove notifications older than N days */
+export function pruneOldNotifications(days = 7): void {
+  db.run(
+    `DELETE FROM sent_notifications WHERE sent_at < datetime('now', '-' || ? || ' days')`,
+    [days]
+  );
+}
+
+/** Get all users that have a push subscription and a canvas token */
+export function getUsersWithPushSubscriptions(): Array<{
+  userId: string;
+  subscription: string;
+  canvasToken: string;
+}> {
+  return db
+    .query<{ user_id: string; subscription: string; canvas_token: string }, []>(
+      `SELECT ps.user_id, ps.subscription, u.canvas_token
+       FROM push_subscriptions ps
+       JOIN users u ON u.id = ps.user_id
+       WHERE u.canvas_token IS NOT NULL`
+    )
+    .all()
+    .map((row) => ({
+      userId: row.user_id,
+      subscription: row.subscription,
+      canvasToken: row.canvas_token,
+    }));
+}
+
+/** Delete a push subscription by user ID (used when subscription expires) */
+export function deletePushSubscriptionSync(userId: string): void {
+  db.run("DELETE FROM push_subscriptions WHERE user_id = ?", [userId]);
 }

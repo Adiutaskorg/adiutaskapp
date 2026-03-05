@@ -19,7 +19,7 @@ const WELCOME_MESSAGE: ChatMessage = {
   id: "welcome",
   role: "bot",
   content:
-    "¡Hola! 👋 Soy UniBot, tu asistente académico. Puedo ayudarte a consultar notas, ver próximas entregas, buscar archivos de tus cursos y mucho más. ¿En qué te puedo ayudar?",
+    "¡Hola! 👋 Soy adiutask, tu asistente académico. Puedo ayudarte a consultar notas, ver próximas entregas, buscar archivos de tus cursos y mucho más. ¿En qué te puedo ayudar?",
   responseType: "text",
   timestamp: Date.now(),
 };

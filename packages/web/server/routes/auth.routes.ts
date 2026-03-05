@@ -7,10 +7,10 @@ import { createJWT, verifyJWTToken } from "../middleware/auth.middleware";
 import { findOrCreateUser, getUserById } from "../db/database";
 
 const SSO_BASE_URL = process.env.SSO_BASE_URL || "https://sso.ufv.es";
-const SSO_CLIENT_ID = process.env.SSO_CLIENT_ID || "unibot-app";
+const SSO_CLIENT_ID = process.env.SSO_CLIENT_ID || "adiutask-app";
 const SSO_CLIENT_SECRET = process.env.SSO_CLIENT_SECRET || "";
 const SSO_CALLBACK_URL = process.env.SSO_CALLBACK_URL || "http://localhost:3000/api/auth/callback";
-const CLIENT_URL = process.env.NODE_ENV === "production" ? "https://unibot.ufv.es" : "http://localhost:5173";
+const CLIENT_URL = process.env.CLIENT_URL || (process.env.NODE_ENV === "production" ? "https://adiutask.app" : "http://localhost:5173");
 const IS_DEV = process.env.NODE_ENV !== "production";
 
 export async function authRoutes(req: Request, url: URL): Promise<Response> {
