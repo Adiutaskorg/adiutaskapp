@@ -24,7 +24,7 @@ function getLLMProvider(): LLMProvider {
 
   const llm = createLLMProvider(
     undefined,
-    2048,
+    4096,
     `- Usa **negrita** para énfasis.
 - Usa emojis como viñetas (📚, ✅, 📅, etc.).
 - NO uses markdown de enlaces [texto](url) a menos que sea un enlace real.`,

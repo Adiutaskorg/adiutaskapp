@@ -5,7 +5,7 @@ import type { ConversationMessage } from "../types/conversation";
 import type { Course } from "../types/canvas";
 
 const MODEL = "claude-sonnet-4-6";
-const MAX_TOOL_ITERATIONS = 8;
+const MAX_TOOL_ITERATIONS = 12;
 
 export interface LLMProvider {
   processMessage(message: string, canvas: CanvasClient, history?: ConversationMessage[]): Promise<string>;
@@ -130,11 +130,51 @@ const tools: Anthropic.Tool[] = [
   {
     name: "get_course_files",
     description:
-      "Lista los archivos más recientes subidos a un curso (apuntes, materiales, PDFs).",
+      "Lista los archivos más recientes subidos a un curso (apuntes, materiales, PDFs). Para navegar carpetas específicas, usa get_course_folders en su lugar.",
     input_schema: {
       type: "object" as const,
       properties: { course_id: { type: "number", description: "ID del curso en Canvas" } },
       required: ["course_id"],
+    },
+  },
+  {
+    name: "get_course_folders",
+    description:
+      "Lista todas las carpetas de un curso. Úsalo para navegar la estructura de archivos del curso. Devuelve id, nombre, ruta completa, número de archivos y subcarpetas.",
+    input_schema: {
+      type: "object" as const,
+      properties: { course_id: { type: "number", description: "ID del curso en Canvas" } },
+      required: ["course_id"],
+    },
+  },
+  {
+    name: "get_folder_files",
+    description:
+      "Lista los archivos dentro de una carpeta específica. Usa get_course_folders primero para obtener el folder_id.",
+    input_schema: {
+      type: "object" as const,
+      properties: { folder_id: { type: "number", description: "ID de la carpeta en Canvas" } },
+      required: ["folder_id"],
+    },
+  },
+  {
+    name: "get_file_download_url",
+    description:
+      "Obtiene la URL pública de descarga de un archivo. Usa get_course_files o get_folder_files primero para obtener el file_id.",
+    input_schema: {
+      type: "object" as const,
+      properties: { file_id: { type: "number", description: "ID del archivo en Canvas" } },
+      required: ["file_id"],
+    },
+  },
+  {
+    name: "get_folder_subfolders",
+    description:
+      "Lista las subcarpetas dentro de una carpeta. Úsalo para navegar dentro de una carpeta que contiene más carpetas.",
+    input_schema: {
+      type: "object" as const,
+      properties: { folder_id: { type: "number", description: "ID de la carpeta en Canvas" } },
+      required: ["folder_id"],
     },
   },
 ];
@@ -159,11 +199,22 @@ function compressToolResult(toolName: string, rawJson: string): string {
       case "get_assignments": {
         const assignments = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
-          assignments.map((a: Record<string, unknown>) => ({
-            name: a.name,
-            due: a.due_at,
-            points: a.points_possible,
-          }))
+          assignments.map((a: Record<string, unknown>) => {
+            let desc = a.description as string | null;
+            if (desc) {
+              desc = desc.replace(/<[^>]*>/g, "").slice(0, 500);
+            }
+            return {
+              id: a.id,
+              name: a.name,
+              due: a.due_at,
+              points: a.points_possible,
+              types: a.submission_types,
+              url: a.html_url,
+              desc,
+              lock: a.lock_at,
+            };
+          })
         );
       }
       case "get_grades":
@@ -171,12 +222,21 @@ function compressToolResult(toolName: string, rawJson: string): string {
       case "get_upcoming_events": {
         const events = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
-          events.map((e: Record<string, unknown>) => ({
-            title: e.title,
-            start: e.start_at,
-            end: e.end_at,
-            course: e.course_name,
-          }))
+          events.map((e: Record<string, unknown>) => {
+            let desc = e.description as string | null;
+            if (desc) {
+              desc = desc.replace(/<[^>]*>/g, "").slice(0, 300);
+            }
+            return {
+              title: e.title,
+              start: e.start_at,
+              end: e.end_at,
+              course: e.course_name,
+              type: e.type,
+              desc,
+              location: e.location,
+            };
+          })
         );
       }
       case "get_announcements": {
@@ -184,22 +244,41 @@ function compressToolResult(toolName: string, rawJson: string): string {
         return JSON.stringify(
           anns.map((a: Record<string, unknown>) => ({
             title: a.title,
-            message: typeof a.message === "string" ? a.message.slice(0, 300) : a.message,
+            message: typeof a.message === "string" ? a.message.replace(/<[^>]*>/g, "").slice(0, 800) : a.message,
             posted: a.posted_at,
             course: a.course_name,
+            url: a.url,
           }))
         );
       }
-      case "get_course_files": {
+      case "get_course_files":
+      case "get_folder_files": {
         const files = Array.isArray(data) ? data.slice(0, 15) : [];
         return JSON.stringify(
           files.map((f: Record<string, unknown>) => ({
+            id: f.id,
             name: f.display_name,
             size: f.size,
+            type: f.content_type,
             updated: f.updated_at,
           }))
         );
       }
+      case "get_course_folders":
+      case "get_folder_subfolders": {
+        const folders = Array.isArray(data) ? data : [];
+        return JSON.stringify(
+          folders.map((f: Record<string, unknown>) => ({
+            id: f.id,
+            name: f.name,
+            path: f.full_name,
+            files: f.files_count,
+            subfolders: f.folders_count,
+          }))
+        );
+      }
+      case "get_file_download_url":
+        return rawJson;
       default:
         return rawJson;
     }
@@ -248,6 +327,18 @@ async function executeTool(
     case "get_course_files":
       rawResult = JSON.stringify(await canvas.getCourseFiles(input.course_id as number));
       break;
+    case "get_course_folders":
+      rawResult = JSON.stringify(await canvas.getCourseFolders(input.course_id as number));
+      break;
+    case "get_folder_files":
+      rawResult = JSON.stringify(await canvas.getFolderFiles(input.folder_id as number));
+      break;
+    case "get_file_download_url":
+      rawResult = JSON.stringify(await canvas.getFileDownloadUrl(input.file_id as number));
+      break;
+    case "get_folder_subfolders":
+      rawResult = JSON.stringify(await canvas.getFolderSubfolders(input.folder_id as number));
+      break;
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -278,7 +369,7 @@ export class ClaudeProvider implements LLMProvider {
 
   constructor(
     apiKey: string,
-    maxTokens = 2048,
+    maxTokens = 4096,
     formatHint = '- Usa **negrita** para énfasis.\n- Usa emojis como viñetas (📚, ✅, 📅, etc.).',
     linkHint = 'Si el usuario no tiene cuenta vinculada, guíale para vincularla.',
   ) {
@@ -364,7 +455,7 @@ export class ClaudeProvider implements LLMProvider {
 
 export function createLLMProvider(
   apiKey?: string,
-  maxTokens = 2048,
+  maxTokens = 4096,
   formatHint?: string,
   linkHint?: string,
 ): LLMProvider | null {

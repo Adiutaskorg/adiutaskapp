@@ -204,6 +204,9 @@ export class CanvasClient {
         due_at: (a.due_at as string) ?? null,
         points_possible: (a.points_possible as number) ?? null,
         submission_types: (a.submission_types as string[]) ?? [],
+        description: (a.description as string) ?? null,
+        html_url: (a.html_url as string) ?? null,
+        lock_at: (a.lock_at as string) ?? null,
       }));
       this.setCache(key, assignments);
     }
@@ -259,6 +262,8 @@ export class CanvasClient {
       end_at: (e.end_at as string) ?? null,
       type: (e.type as string) ?? "",
       course_name: e.context_name as string | null ?? null,
+      description: (e.description as string) ?? null,
+      location: (e.location_name as string) ?? null,
     }));
     this.setCache(key, result);
     return result;
@@ -280,6 +285,7 @@ export class CanvasClient {
       message: (a.message as string) ?? "",
       posted_at: (a.posted_at as string) ?? "",
       course_name: (a.context_code as string)?.replace("course_", "") ?? null,
+      url: (a.html_url as string) ?? null,
     }));
     this.setCache(key, result);
     return result;
@@ -301,6 +307,7 @@ export class CanvasClient {
       size: (f.size as number) ?? 0,
       url: (f.url as string) ?? "",
       updated_at: (f.updated_at as string) ?? "",
+      content_type: (f.content_type as string) ?? "",
     }));
     this.setCache(key, result);
     return result;
@@ -323,6 +330,7 @@ export class CanvasClient {
       size: (f.size as number) ?? 0,
       url: (f.url as string) ?? "",
       updated_at: (f.updated_at as string) ?? "",
+      content_type: (f.content_type as string) ?? "",
     };
   }
 
@@ -364,6 +372,7 @@ export class CanvasClient {
       size: (f.size as number) ?? 0,
       url: (f.url as string) ?? "",
       updated_at: (f.updated_at as string) ?? "",
+      content_type: (f.content_type as string) ?? "",
     }));
     this.setCache(key, result);
     return result;

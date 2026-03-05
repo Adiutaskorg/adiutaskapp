@@ -16,6 +16,9 @@ export interface Assignment {
   due_at: string | null;
   points_possible: number | null;
   submission_types: string[];
+  description: string | null;
+  html_url: string | null;
+  lock_at: string | null;
 }
 
 export interface Grades {
@@ -31,6 +34,8 @@ export interface CalendarEvent {
   end_at: string | null;
   type: string;
   course_name: string | null;
+  description: string | null;
+  location: string | null;
 }
 
 export interface Announcement {
@@ -38,6 +43,7 @@ export interface Announcement {
   message: string;
   posted_at: string;
   course_name: string | null;
+  url: string | null;
 }
 
 export interface CourseFile {
@@ -46,6 +52,7 @@ export interface CourseFile {
   size: number;
   url: string;
   updated_at: string;
+  content_type: string;
 }
 
 export interface CourseFolder {
