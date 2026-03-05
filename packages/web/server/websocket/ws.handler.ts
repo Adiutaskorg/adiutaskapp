@@ -79,7 +79,7 @@ export const websocketHandler = {
           // Send typing indicator
           send(ws, { type: "typing_indicator" });
 
-          // Process through the 3-tier bot engine
+          // Process through the LLM bot engine
           const startTime = performance.now();
           const botResponse = await processMessage(userId, data.payload.trim());
           const processingTime = Math.round(performance.now() - startTime);

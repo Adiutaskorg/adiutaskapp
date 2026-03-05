@@ -36,42 +36,55 @@ export async function dashboardRoutes(
     const courses = await canvas.getCourses();
 
     // Fetch pending assignments across all courses (parallel)
+    const now = new Date();
+    const sixMonthsFromNow = new Date();
+    sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
+
     const assignmentResults = await Promise.allSettled(
       courses.map(async (c) => {
         const assignments = await canvas.getAssignments(c.id, true);
-        return assignments.map((a) => {
-          const isOverdue = a.due_at && new Date(a.due_at) < new Date();
-          return {
-            id: String(a.id),
-            name: a.name,
-            courseName: c.name,
-            dueAt: a.due_at,
-            status: isOverdue ? "overdue" as const : "upcoming" as const,
-          };
-        });
+        return assignments
+          .filter((a) => {
+            // Skip assignments without due date
+            if (!a.due_at) return false;
+            // Skip assignments with absurd due dates (> 6 months away)
+            const dueDate = new Date(a.due_at);
+            if (dueDate > sixMonthsFromNow) return false;
+            return true;
+          })
+          .map((a) => {
+            const isOverdue = new Date(a.due_at!) < now;
+            return {
+              id: String(a.id),
+              name: a.name,
+              courseName: c.name,
+              dueAt: a.due_at!,
+              status: isOverdue ? "overdue" as const : "upcoming" as const,
+            };
+          });
       })
     );
-    type DashAssignment = { id: string; name: string; courseName: string; dueAt: string | null; status: "overdue" | "upcoming" };
+    type DashAssignment = { id: string; name: string; courseName: string; dueAt: string; status: "overdue" | "upcoming" };
     const allAssignments: DashAssignment[] = assignmentResults
       .filter((r): r is PromiseFulfilledResult<DashAssignment[]> => r.status === "fulfilled")
       .flatMap((r) => r.value);
 
-    // Sort by due date
-    allAssignments.sort((a: DashAssignment, b: DashAssignment) => {
-      if (!a.dueAt) return 1;
-      if (!b.dueAt) return -1;
-      return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
-    });
+    // Sort by due date (nearest first)
+    allAssignments.sort((a: DashAssignment, b: DashAssignment) =>
+      new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime()
+    );
 
     // Fetch grades (parallel)
     const gradeResults = await Promise.allSettled(
       courses.map(async (c) => {
         const grades = await canvas.getGrades(c.id);
-        if (grades.current_score !== null) {
+        // current_score is already a percentage (0-100) from Canvas
+        // Convert to /10 scale (standard in Spanish universities)
+        if (grades.current_score !== null && grades.current_score >= 0 && grades.current_score <= 100) {
           return {
             courseName: grades.course_name || c.name,
             assignmentName: "Nota actual",
-            score: grades.current_score,
+            score: Math.round(grades.current_score) / 10,
             maxScore: 10,
           };
         }

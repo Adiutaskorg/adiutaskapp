@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun install:*)",
+      "Bash(npm install:*)",
+      "Bash(bun:*)",
+      "Bash(npx vite:*)",
+      "Bash(curl:*)",
+      "Bash(taskkill:*)",
+      "Bash(rm:*)",
+      "Bash(npx tsc:*)",
+      "Bash(./node_modules/.bin/tsc:*)",
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "Bash(start:*)",
+      "Bash(npm run:*)",
+      "Bash(cp:*)",
+      "Bash(shopt:*)",
+      "Bash(read f:*)",
+      "Bash(gh api:*)",
+      "Bash(netstat:*)",
+      "Bash(powershell:*)",
+      "Bash(\"C:/Users/guill/desktop/adiutaskapp/packages/web/.env.example\":*)",
+      "Bash(docker build:*)",
+      "Bash(openssl rand:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

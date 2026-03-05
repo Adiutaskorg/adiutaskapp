@@ -4,6 +4,7 @@ import { MessageCircle, LayoutDashboard, Settings } from "lucide-react";
 import { motion, AnimatePresence, useMotionValue, useTransform, PanInfo } from "framer-motion";
 import { useAuthStore } from "@/stores/auth.store";
 import { useChatStore } from "@/stores/chat.store";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 const NAV_ITEMS = [
   { to: "/", label: "Chat", icon: MessageCircle, end: true },
@@ -22,10 +23,14 @@ function haptic(duration = 10) {
 
 export function AppLayout() {
   const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const isConnected = useChatStore((s) => s.isConnected);
   const clearMessages = useChatStore((s) => s.clearMessages);
   const location = useLocation();
   const navigate = useNavigate();
+
+  // WebSocket lives here so the connection persists across all tabs
+  const { sendMessage } = useWebSocket({ enabled: isAuthenticated });
 
   const handleLogoClick = useCallback(() => {
     haptic(6);
@@ -109,7 +114,7 @@ export function AppLayout() {
             transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
             className="h-full"
           >
-            <Outlet />
+            <Outlet context={{ sendMessage }} />
           </motion.div>
         </AnimatePresence>
       </main>

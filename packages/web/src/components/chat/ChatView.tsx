@@ -1,21 +1,23 @@
 import { useRef, useEffect } from "react";
+import { useOutletContext } from "react-router-dom";
 import { AnimatePresence } from "framer-motion";
 import { useChatStore } from "@/stores/chat.store";
-import { useAuthStore } from "@/stores/auth.store";
 import { ChatBubble } from "./ChatBubble";
 import { ChatInput } from "./ChatInput";
 import { TypingIndicator } from "./TypingIndicator";
 import { WelcomeScreen } from "./WelcomeScreen";
-import { useWebSocket } from "@/hooks/useWebSocket";
+
+interface AppOutletContext {
+  sendMessage: (text: string) => void;
+}
 
 export function ChatView() {
   const messages = useChatStore((s) => s.messages);
   const isTyping = useChatStore((s) => s.isTyping);
   const quickActions = useChatStore((s) => s.quickActions);
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { sendMessage } = useWebSocket({ enabled: isAuthenticated });
+  const { sendMessage } = useOutletContext<AppOutletContext>();
 
   useEffect(() => {
     if (scrollRef.current) {
