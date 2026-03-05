@@ -9,9 +9,13 @@ export function validateEnv() {
   const warnings: string[] = [];
   const errors: string[] = [];
 
-  // Anthropic API Key (required)
+  // Anthropic API Key (required for chat, but don't block server startup)
   if (!process.env.ANTHROPIC_API_KEY) {
-    errors.push("ANTHROPIC_API_KEY no configurado — es obligatorio para el funcionamiento de adiutask");
+    if (IS_PROD) {
+      errors.push("ANTHROPIC_API_KEY no configurado — es obligatorio para el funcionamiento de adiutask");
+    } else {
+      warnings.push("ANTHROPIC_API_KEY no configurado — el chat no funcionará");
+    }
   }
 
   // JWT Secret

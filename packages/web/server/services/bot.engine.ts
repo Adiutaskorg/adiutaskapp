@@ -14,24 +14,31 @@ const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL || "https://ufv-es.instructu
 
 // Shared instances
 const conversation = new ConversationStore();
-const llm = createLLMProvider(
-  undefined,
-  2048,
-  `- Usa **negrita** para énfasis.
+
+// Lazy LLM initialization — avoids process.exit at import time so the server
+// can start and respond to healthchecks even if ANTHROPIC_API_KEY is missing.
+let llmProvider: LLMProvider | null = null;
+
+function getLLMProvider(): LLMProvider {
+  if (llmProvider) return llmProvider;
+
+  const llm = createLLMProvider(
+    undefined,
+    2048,
+    `- Usa **negrita** para énfasis.
 - Usa emojis como viñetas (📚, ✅, 📅, etc.).
 - NO uses markdown de enlaces [texto](url) a menos que sea un enlace real.`,
-  'Si el usuario no tiene cuenta vinculada, guíale para vincularla escribiendo "vincular".',
-);
+    'Si el usuario no tiene cuenta vinculada, guíale para vincularla escribiendo "vincular".',
+  );
 
-if (!llm) {
-  console.error("[BOT] FATAL: ANTHROPIC_API_KEY is required. Cannot start without LLM provider.");
-  process.exit(1);
+  if (!llm) {
+    throw new Error("ANTHROPIC_API_KEY is required. Cannot process messages without LLM provider.");
+  }
+
+  llmProvider = llm;
+  console.log("[BOT] Claude LLM provider initialized");
+  return llmProvider;
 }
-
-// After the process.exit guard, llm is guaranteed to be non-null
-const llmProvider: LLMProvider = llm;
-
-console.log("[BOT] Claude LLM provider initialized");
 
 // Track users awaiting Canvas token input
 const awaitingToken = new Set<string>();
@@ -83,7 +90,7 @@ export async function processMessage(userId: string, message: string): Promise<B
   try {
     // ========== LLM processing ==========
     console.log(`[BOT] LLM processing: "${trimmed.slice(0, 50)}"`);
-    const llmResponse = await llmProvider.processMessage(message, canvas, history);
+    const llmResponse = await getLLMProvider().processMessage(message, canvas, history);
     conversation.addMessage(userId, "user", message);
     conversation.addMessage(userId, "assistant", llmResponse);
     return { text: llmResponse, resolvedBy: "llm" };
