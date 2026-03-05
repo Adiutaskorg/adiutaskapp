@@ -50,31 +50,35 @@ Bun.serve({
     }
 
     // --- API Routes ---
+    let response: Response;
     try {
       // Auth routes (public)
       if (path.startsWith("/api/auth")) {
-        return await authRoutes(req, url);
+        response = await authRoutes(req, url);
+      } else {
+        // Protected routes — require valid JWT
+        const authResult = await verifyJWT(req);
+        if (!authResult.ok) {
+          response = json({ error: "Unauthorized" }, 401);
+        } else if (path.startsWith("/api/dashboard")) {
+          response = await dashboardRoutes(req, url, authResult.userId);
+        } else if (path.startsWith("/api/push")) {
+          response = await pushRoutes(req, url, authResult.userId);
+        } else {
+          response = json({ error: "Not found" }, 404);
+        }
       }
-
-      // Protected routes — require valid JWT
-      const authResult = await verifyJWT(req);
-      if (!authResult.ok) {
-        return json({ error: "Unauthorized" }, 401);
-      }
-
-      if (path.startsWith("/api/dashboard")) {
-        return await dashboardRoutes(req, url, authResult.userId);
-      }
-
-      if (path.startsWith("/api/push")) {
-        return await pushRoutes(req, url, authResult.userId);
-      }
-
-      return json({ error: "Not found" }, 404);
     } catch (err) {
       console.error("[Server] Error:", err);
-      return json({ error: "Internal server error" }, 500);
+      response = json({ error: "Internal server error" }, 500);
     }
+
+    // Add CORS headers to ALL responses
+    const cors = corsHeaders();
+    for (const [key, value] of Object.entries(cors)) {
+      response!.headers.set(key, value);
+    }
+    return response!
   },
 
   // --- WebSocket Handler ---
