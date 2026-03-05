@@ -102,7 +102,7 @@ export function LoginView() {
           variants={fadeUp}
           className="mx-auto mb-8"
         >
-          <img src="/logo.png" alt="adiutask" className="h-24 w-24 rounded-3xl shadow-glow-brand" />
+          <img src="/logo.png" alt="adiutask" className="mx-auto h-24 w-24 rounded-3xl shadow-glow-brand" />
         </motion.div>
 
         {/* Title */}
