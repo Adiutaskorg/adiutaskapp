@@ -16,8 +16,8 @@ interface WSData {
   connectedAt: number;
 }
 
-/** Active connections map */
-const connections = new Map<string, ServerWebSocket<WSData>>();
+/** Active connections map — multiple sessions per user */
+const connections = new Map<string, Set<ServerWebSocket<WSData>>>();
 
 /**
  * Handle HTTP → WebSocket upgrade
@@ -57,15 +57,13 @@ export async function handleWebSocketUpgrade(req: Request, server: any): Promise
 export const websocketHandler = {
   open(ws: ServerWebSocket<WSData>) {
     const { userId } = ws.data;
-    console.log(`[WS] Client connected: ${userId}`);
-
-    // Close previous connection if exists (single session)
-    const existing = connections.get(userId);
-    if (existing) {
-      existing.close(WS_CLOSE_CODES.NORMAL, "New session opened");
+    let userSessions = connections.get(userId);
+    if (!userSessions) {
+      userSessions = new Set();
+      connections.set(userId, userSessions);
     }
-
-    connections.set(userId, ws);
+    userSessions.add(ws);
+    console.log(`[WS] Client connected: ${userId} (${userSessions.size} session(s))`);
   },
 
   async message(ws: ServerWebSocket<WSData>, raw: string | Buffer) {
@@ -99,7 +97,8 @@ export const websocketHandler = {
             timestamp: Date.now(),
           };
 
-          send(ws, { type: "chat_response", message });
+          // Send response to ALL sessions of this user
+          sendToAllSessions(userId, { type: "chat_response", message });
 
           // Persist both user message and bot response to database
           saveChatMessage(userId, "user", data.payload.trim()).catch(() => {});
@@ -129,8 +128,12 @@ export const websocketHandler = {
 
   close(ws: ServerWebSocket<WSData>, code: number, reason: string) {
     const { userId } = ws.data;
-    console.log(`[WS] Client disconnected: ${userId} (${code}: ${reason})`);
-    connections.delete(userId);
+    const userSessions = connections.get(userId);
+    if (userSessions) {
+      userSessions.delete(ws);
+      if (userSessions.size === 0) connections.delete(userId);
+    }
+    console.log(`[WS] Client disconnected: ${userId} (${code}: ${reason}) (${userSessions?.size ?? 0} remaining)`);
   },
 };
 
@@ -142,13 +145,21 @@ function send(ws: ServerWebSocket<WSData>, message: WSServerMessage) {
   }
 }
 
+/** Send to all sessions of a user */
+function sendToAllSessions(userId: string, message: WSServerMessage): void {
+  const userSessions = connections.get(userId);
+  if (userSessions) {
+    for (const ws of userSessions) send(ws, message);
+  }
+}
+
 /**
  * Send a push message to a connected user (used by notification service)
  */
 export function sendToUser(userId: string, message: WSServerMessage): boolean {
-  const ws = connections.get(userId);
-  if (ws) {
-    send(ws, message);
+  const userSessions = connections.get(userId);
+  if (userSessions && userSessions.size > 0) {
+    sendToAllSessions(userId, message);
     return true;
   }
   return false;
