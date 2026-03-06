@@ -48,6 +48,16 @@ function getLLMProvider(): LLMProvider {
 // Track users awaiting Canvas token input
 const awaitingToken = new Set<string>();
 
+// Track pending course disambiguation (Bug 3)
+interface PendingAction {
+  type: "select_course";
+  originalIntent: string;
+  candidates: Course[];
+  timestamp: number;
+}
+const pendingActions = new Map<string, PendingAction>();
+const PENDING_TTL = 5 * 60 * 1000; // 5 minutes
+
 // Per-user Canvas client cache (avoids re-creating per message)
 const canvasClients = new Map<string, CanvasClient>();
 
@@ -143,12 +153,42 @@ export async function processMessage(userId: string, message: string): Promise<B
     canvasClients.set(userId, canvas);
   }
 
+  // --- Check for pending course disambiguation ---
+  const pending = pendingActions.get(userId);
+  if (pending && Date.now() - pending.timestamp < PENDING_TTL) {
+    // Try number selection ("1", "2", etc.)
+    const num = parseInt(trimmed);
+    if (!isNaN(num) && num >= 1 && num <= pending.candidates.length) {
+      pendingActions.delete(userId);
+      const selected = pending.candidates[num - 1];
+      console.log(`[BOT] Pending resolved by number: ${num} → ${selected.name}`);
+      const response = await executeIntentForCourse(pending.originalIntent, selected, canvas);
+      conversation.addMessage(userId, "user", message);
+      conversation.addMessage(userId, "assistant", response.text);
+      recordMetric("tier1", `pending_${pending.originalIntent}`, userId, trimmed, startTime);
+      return response;
+    }
+    // Try text resolution against candidates
+    const resolved = resolveCourse(trimmed, pending.candidates);
+    if (resolved.course) {
+      pendingActions.delete(userId);
+      console.log(`[BOT] Pending resolved: "${trimmed}" → ${resolved.course.name}`);
+      const response = await executeIntentForCourse(pending.originalIntent, resolved.course, canvas);
+      conversation.addMessage(userId, "user", message);
+      conversation.addMessage(userId, "assistant", response.text);
+      recordMetric("tier1", `pending_${pending.originalIntent}`, userId, trimmed, startTime);
+      return response;
+    }
+    // Couldn't resolve → clear pending, continue normal routing
+    pendingActions.delete(userId);
+  }
+
   // --- TIER 1: Regex/keyword pattern matching ---
   const tier1 = detectIntentTier1(trimmed);
   if (tier1) {
     try {
       console.log(`[BOT] Tier1 intent: ${tier1.id} (regex, no LLM)`);
-      const directResponse = await handleIntent(tier1, canvas);
+      const directResponse = await handleIntent(tier1, canvas, userId);
       conversation.addMessage(userId, "user", message);
       conversation.addMessage(userId, "assistant", directResponse.text);
       recordMetric("tier1", tier1.id, userId, trimmed, startTime);
@@ -172,7 +212,7 @@ export async function processMessage(userId: string, message: string): Promise<B
   if (tier2) {
     try {
       console.log(`[BOT] Tier2 intent: ${tier2.id} (fuzzy score=${tier2.score.toFixed(2)}, no LLM)`);
-      const directResponse = await handleIntent(tier2, canvas);
+      const directResponse = await handleIntent(tier2, canvas, userId);
       conversation.addMessage(userId, "user", message);
       conversation.addMessage(userId, "assistant", directResponse.text);
       recordMetric("tier2", tier2.id, userId, trimmed, startTime);
@@ -599,11 +639,226 @@ function extractCourseHint(message: string): string | undefined {
   return undefined;
 }
 
-function matchCourses(courses: Course[], hint: string): Course[] {
-  const h = hint.toLowerCase();
-  return courses.filter(
-    (c) => c.name.toLowerCase().includes(h) || c.course_code.toLowerCase().includes(h),
+// ── Course normalization (strip accents, parenthetical content, punctuation) ──
+
+function normalizeCourse(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\([^)]*\)/g, "")
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ── Non-academic course filter (Bug 2) ──
+
+const NON_ACADEMIC_PATTERNS = [
+  /^biblioteca$/i,
+  /^carreras?\s+profesionales?/i,
+  /^emprendimiento/i,
+  /^escuela\s+polit[eé]cnica/i,
+  /alumnos\s*$/i,
+  /^vivo\s+la\s+ufv$/i,
+  /^actividades?\s+formativas?\s+complementarias?/i,
+  /^la\s+red\s+subterran/i,
+  /^orientaci[oó]n/i,
+  /^tutor[ií]a/i,
+  /^comunidad/i,
+  /^bolsa\s+de\s+trabajo/i,
+  /^pastoral/i,
+  /^deporte/i,
+  /^vida\s+universitaria/i,
+  /^servicio/i,
+  /^secretar[ií]a/i,
+  /^alumni/i,
+];
+
+function isAcademicCourse(course: Course): boolean {
+  const name = course.name.trim();
+  if (NON_ACADEMIC_PATTERNS.some((p) => p.test(name))) return false;
+  if (!course.course_code || course.course_code === course.name) return false;
+  return true;
+}
+
+function filterAcademic(courses: Course[]): Course[] {
+  return courses.filter(isAcademicCourse);
+}
+
+// ── Course aliases (common student abbreviations) ──
+
+const COURSE_ALIASES: Record<string, string[]> = {
+  "mates": ["matematicas"],
+  "mate": ["matematicas"],
+  "fisica": ["fisica"],
+  "mecanica": ["fisica mecanica", "mecanica"],
+  "electro": ["fisica electromagnetica", "electromagnetica"],
+  "electromag": ["fisica electromagnetica", "electromagnetica"],
+  "progra": ["programacion"],
+  "intro progra": ["introduccion a la programacion"],
+  "expr": ["expresion grafica"],
+  "dibujo": ["expresion grafica"],
+  "grafica": ["expresion grafica"],
+  "info": ["informatica", "fundamentos"],
+  "informatica": ["informatica", "fundamentos de ingenieria informatica"],
+  "fundamentos": ["fundamentos"],
+  "gestion": ["gestion"],
+  "empresa": ["gestion empresarial"],
+  "empresarial": ["gestion empresarial"],
+  "habilidades": ["habilidades", "gestion del conocimiento"],
+  "proyecto": ["proyecto integrador"],
+  "pib": ["proyecto integrador basico"],
+  "integrador": ["proyecto integrador"],
+  "derecho": ["derecho"],
+  "filosofia": ["filosofia"],
+  "filo": ["filosofia"],
+  "historia": ["historia"],
+  "estadistica": ["estadistica"],
+  "estadi": ["estadistica"],
+  "economia": ["economia"],
+  "eco": ["economia"],
+  "contabilidad": ["contabilidad"],
+  "conta": ["contabilidad"],
+  "marketing": ["marketing"],
+  "psicologia": ["psicologia"],
+  "psico": ["psicologia"],
+};
+
+// ── Levenshtein distance for typo tolerance ──
+
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
   );
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// ── Course resolver (Bug 1) ──
+
+interface CourseMatch { course: Course; confidence: string }
+interface CourseNoMatch { course: null; candidates: Course[] }
+
+function resolveCourse(query: string, courses: Course[]): CourseMatch | CourseNoMatch {
+  const q = normalizeCourse(query);
+  if (q.length < 2) return { course: null, candidates: [] };
+
+  // PASO 1: Exact match (name or code)
+  for (const c of courses) {
+    if (normalizeCourse(c.name) === q || normalizeCourse(c.course_code) === q) {
+      return { course: c, confidence: "exact" };
+    }
+  }
+
+  // PASO 2: Query is substring of course name
+  const substringMatches = courses.filter((c) => normalizeCourse(c.name).includes(q));
+  if (substringMatches.length === 1) return { course: substringMatches[0], confidence: "high" };
+  if (substringMatches.length > 1) return { course: null, candidates: substringMatches };
+
+  // PASO 3: Query is prefix of any word in course name
+  const prefixMatches = courses.filter((c) => {
+    const words = normalizeCourse(c.name).split(/\s+/);
+    return words.some((w) => w.startsWith(q));
+  });
+  if (prefixMatches.length === 1) return { course: prefixMatches[0], confidence: "high" };
+  if (prefixMatches.length > 1) return { course: null, candidates: prefixMatches };
+
+  // PASO 4: Aliases
+  const aliasTargets = COURSE_ALIASES[q];
+  if (aliasTargets) {
+    const aliasMatches = courses.filter((c) =>
+      aliasTargets.some((target) => normalizeCourse(c.name).includes(target))
+    );
+    if (aliasMatches.length === 1) return { course: aliasMatches[0], confidence: "high" };
+    if (aliasMatches.length > 1) return { course: null, candidates: aliasMatches };
+  }
+
+  // PASO 5: Fuzzy (Levenshtein ≤ 2) against each word
+  const fuzzyMatches = courses.filter((c) => {
+    const words = normalizeCourse(c.name).split(/\s+/);
+    return words.some((w) => levenshteinDistance(q, w) <= 2 && w.length > 2);
+  });
+  if (fuzzyMatches.length === 1) return { course: fuzzyMatches[0], confidence: "medium" };
+  if (fuzzyMatches.length > 1) return { course: null, candidates: fuzzyMatches };
+
+  return { course: null, candidates: [] };
+}
+
+// ── Execute intent for a specific resolved course ──
+
+async function executeIntentForCourse(intent: string, course: Course, canvas: CanvasClient): Promise<BotResponse> {
+  switch (intent) {
+    case "files": {
+      const files = await canvas.getCourseFiles(course.id);
+      if (files.length === 0) {
+        return { text: `No hay archivos en **${course.name}**.`, resolvedBy: "system" };
+      }
+      const shown = files.slice(0, 10);
+      const fileInfos = buildFileInfos(shown.map((f) => ({
+        id: f.id, name: f.display_name, size: f.size, contentType: f.content_type, updatedAt: f.updated_at,
+      })));
+      const lines = shown.map((f) => {
+        const size = f.size > 0 ? ` (${(f.size / 1024).toFixed(0)} KB)` : "";
+        return `**${f.display_name}**${size}`;
+      });
+      let text = `**Archivos de ${course.name}** (${files.length}):\n\n${lines.join("\n")}`;
+      if (files.length > 10) text += `\n\n...y ${files.length - 10} más.`;
+      const response: BotResponse = { text, resolvedBy: "system" };
+      if (fileInfos.length > 0) {
+        response.responseType = "file_list";
+        response.metadata = { files: fileInfos };
+      }
+      return response;
+    }
+    case "grades": {
+      try {
+        const grades = await canvas.getGrades(course.id);
+        if (!grades || grades.current_score === null) {
+          return { text: `**${course.name}**: Sin calificación aún.`, resolvedBy: "system" };
+        }
+        const nota = (grades.current_score / 10).toFixed(1);
+        return { text: `**${course.name}**: **${nota} / 10**`, resolvedBy: "system" };
+      } catch {
+        return { text: `No pude obtener las notas de **${course.name}**.`, resolvedBy: "system" };
+      }
+    }
+    case "assignments": {
+      try {
+        const assignments = await canvas.getAssignments(course.id, true);
+        if (assignments.length === 0) {
+          return { text: `No tienes tareas pendientes en **${course.name}**.`, resolvedBy: "system" };
+        }
+        assignments.sort((a, b) => {
+          if (!a.due_at && !b.due_at) return 0;
+          if (!a.due_at) return 1;
+          if (!b.due_at) return -1;
+          return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+        });
+        const shown = assignments.slice(0, 7);
+        const lines = shown.map((a) => {
+          const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha límite";
+          return `**${a.name}**\n   Entrega: ${date}`;
+        });
+        let text = `**Tareas pendientes de ${course.name} (${assignments.length}):**\n\n${lines.join("\n\n")}`;
+        if (assignments.length > 7) text += `\n\n...y ${assignments.length - 7} más.`;
+        return { text, resolvedBy: "system" };
+      } catch {
+        return { text: `No pude obtener las tareas de **${course.name}**.`, resolvedBy: "system" };
+      }
+    }
+    default:
+      return { text: `No sé cómo hacer "${intent}" para un curso específico.`, resolvedBy: "system" };
+  }
 }
 
 function formatDateMadrid(iso: string): string {
@@ -621,7 +876,7 @@ function formatDateMadrid(iso: string): string {
 // Intent dispatcher + handlers
 // ============================================
 
-async function handleIntent(intent: MatchedIntent, canvas: CanvasClient): Promise<BotResponse> {
+async function handleIntent(intent: MatchedIntent, canvas: CanvasClient, userId?: string): Promise<BotResponse> {
   switch (intent.type) {
     case "greeting":
       return { text: "¡Hola! ¿En qué puedo ayudarte hoy?\n\nEscribe **\"ayuda\"** para ver lo que puedo hacer.", resolvedBy: "system" };
@@ -633,14 +888,14 @@ async function handleIntent(intent: MatchedIntent, canvas: CanvasClient): Promis
       return {
         text:
           "**Puedo ayudarte con:**\n\n" +
-          '📚 **"Mis cursos"** — ver tus asignaturas\n' +
-          '📊 **"Mis notas"** — consultar calificaciones\n' +
-          '📝 **"Tareas pendientes"** — ver entregas próximas\n' +
-          '📅 **"Eventos"** — consultar tu calendario\n' +
-          '📢 **"Anuncios"** — ver noticias de tus cursos\n' +
-          '📁 **"Archivos"** — ver materiales de tus cursos\n' +
-          '📋 **"Resumen"** — vista general de pendientes\n' +
-          '📅 **"Qué tengo hoy"** — agenda del día\n\n' +
+          '**"Mis cursos"** — ver tus asignaturas\n' +
+          '**"Mis notas"** — consultar calificaciones\n' +
+          '**"Tareas pendientes"** — ver entregas próximas\n' +
+          '**"Eventos"** — consultar tu calendario\n' +
+          '**"Anuncios"** — ver noticias de tus cursos\n' +
+          '**"Archivos de [asignatura]"** — ver materiales\n' +
+          '**"Resumen"** — vista general de pendientes\n' +
+          '**"Qué tengo hoy"** — agenda del día\n\n' +
           "También puedo responder preguntas más complejas sobre tus asignaturas.",
         resolvedBy: "system",
       };
@@ -652,15 +907,15 @@ async function handleIntent(intent: MatchedIntent, canvas: CanvasClient): Promis
     case "courses":
       return await handleCoursesIntent(canvas);
     case "grades":
-      return await handleGradesIntent(canvas, intent.courseHint);
+      return await handleGradesIntent(canvas, intent.courseHint, userId);
     case "assignments":
-      return await handleAssignmentsIntent(canvas, intent.courseHint);
+      return await handleAssignmentsIntent(canvas, intent.courseHint, userId);
     case "events":
       return await handleEventsIntent(canvas);
     case "announcements":
       return await handleAnnouncementsIntent(canvas);
     case "files":
-      return await handleFilesIntent(canvas, intent.courseHint);
+      return await handleFilesIntent(canvas, intent.courseHint, userId);
     case "overview":
       return await handleOverviewIntent(canvas);
     default:
@@ -687,27 +942,38 @@ function randomPick(arr: string[]): string {
 // ── Canvas intent handlers ──
 
 async function handleCoursesIntent(canvas: CanvasClient): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
+  const courses = filterAcademic(await canvas.getCourses());
   if (courses.length === 0) {
     return { text: "No tienes cursos activos en Canvas.", resolvedBy: "system" };
   }
-  const lines = courses.map((c) => `📚 **${c.name}** (${c.course_code})`);
+  const lines = courses.map((c) => `**${c.name}** (${c.course_code})`);
   return {
-    text: `Tienes **${courses.length} curso${courses.length !== 1 ? "s" : ""} activo${courses.length !== 1 ? "s" : ""}**:\n\n${lines.join("\n")}`,
+    text: `Tienes **${courses.length} asignatura${courses.length !== 1 ? "s" : ""}**:\n\n${lines.join("\n")}`,
     resolvedBy: "system",
   };
 }
 
-async function handleGradesIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
-  let targets = courses;
+async function handleGradesIntent(canvas: CanvasClient, courseHint?: string, userId?: string): Promise<BotResponse> {
+  const courses = filterAcademic(await canvas.getCourses());
+
   if (courseHint) {
-    const matched = matchCourses(courses, courseHint);
-    if (matched.length > 0) targets = matched;
+    const resolved = resolveCourse(courseHint, courses);
+    if (resolved.course) {
+      return executeIntentForCourse("grades", resolved.course, canvas);
+    }
+    if (resolved.candidates.length > 1 && userId) {
+      pendingActions.set(userId, {
+        type: "select_course", originalIntent: "grades",
+        candidates: resolved.candidates, timestamp: Date.now(),
+      });
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
+    }
+    // No match → show all grades
   }
 
   const results = await Promise.all(
-    targets.map(async (c) => {
+    courses.map(async (c) => {
       try {
         return { course: c, grades: await canvas.getGrades(c.id) };
       } catch {
@@ -718,28 +984,39 @@ async function handleGradesIntent(canvas: CanvasClient, courseHint?: string): Pr
 
   const lines = results.map(({ course, grades }) => {
     if (!grades || grades.current_score === null) {
-      return `📚 **${course.name}**: Sin calificación aún`;
+      return `**${course.name}**: Sin calificación aún`;
     }
     const nota = (grades.current_score / 10).toFixed(1);
-    return `📚 **${course.name}**: **${nota} / 10**`;
+    return `**${course.name}**: **${nota} / 10**`;
   });
 
   return {
-    text: `📊 **Tus calificaciones:**\n\n${lines.join("\n")}`,
+    text: `**Tus calificaciones:**\n\n${lines.join("\n")}`,
     resolvedBy: "system",
   };
 }
 
-async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
-  let targets = courses;
+async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string, userId?: string): Promise<BotResponse> {
+  const courses = filterAcademic(await canvas.getCourses());
+
   if (courseHint) {
-    const matched = matchCourses(courses, courseHint);
-    if (matched.length > 0) targets = matched;
+    const resolved = resolveCourse(courseHint, courses);
+    if (resolved.course) {
+      return executeIntentForCourse("assignments", resolved.course, canvas);
+    }
+    if (resolved.candidates.length > 1 && userId) {
+      pendingActions.set(userId, {
+        type: "select_course", originalIntent: "assignments",
+        candidates: resolved.candidates, timestamp: Date.now(),
+      });
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
+    }
+    // No match → show all
   }
 
   const results = await Promise.all(
-    targets.map(async (c) => {
+    courses.map(async (c) => {
       try {
         const assignments = await canvas.getAssignments(c.id, true);
         return assignments.map((a) => ({ ...a, courseName: c.name }));
@@ -758,16 +1035,16 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
   });
 
   if (all.length === 0) {
-    return { text: "¡No tienes tareas pendientes!", resolvedBy: "system" };
+    return { text: "No tienes tareas pendientes.", resolvedBy: "system" };
   }
 
   const shown = all.slice(0, 7);
   const lines = shown.map((a) => {
     const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha límite";
-    return `📝 **${a.name}** (${a.courseName})\n   Entrega: ${date}`;
+    return `**${a.name}** (${a.courseName})\n   Entrega: ${date}`;
   });
 
-  let text = `📝 **Tareas pendientes (${all.length}):**\n\n${lines.join("\n\n")}`;
+  let text = `**Tareas pendientes (${all.length}):**\n\n${lines.join("\n\n")}`;
   if (all.length > 7) {
     text += `\n\n...y ${all.length - 7} más. Pregúntame por un curso específico para ver todas.`;
   }
@@ -798,7 +1075,7 @@ async function handleEventsIntent(canvas: CanvasClient): Promise<BotResponse> {
 }
 
 async function handleAnnouncementsIntent(canvas: CanvasClient): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
+  const courses = filterAcademic(await canvas.getCourses());
   const courseIds = courses.map((c) => c.id);
 
   if (courseIds.length === 0) {
@@ -826,46 +1103,43 @@ async function handleAnnouncementsIntent(canvas: CanvasClient): Promise<BotRespo
   return { text, resolvedBy: "system" };
 }
 
-async function handleFilesIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
+async function handleFilesIntent(canvas: CanvasClient, courseHint?: string, userId?: string): Promise<BotResponse> {
+  const courses = filterAcademic(await canvas.getCourses());
 
   if (courseHint) {
-    const matched = matchCourses(courses, courseHint);
-    if (matched.length === 1) {
-      const course = matched[0];
-      const files = await canvas.getCourseFiles(course.id);
-      if (files.length === 0) {
-        return { text: `📁 No hay archivos en **${course.name}**.`, resolvedBy: "system" };
-      }
-      const shown = files.slice(0, 10);
-      const lines = shown.map((f) => {
-        const size = f.size > 0 ? ` (${(f.size / 1024).toFixed(0)} KB)` : "";
-        return `📄 **${f.display_name}**${size}`;
-      });
-      let text = `📁 **Archivos de ${course.name}** (${files.length}):\n\n${lines.join("\n")}`;
-      if (files.length > 10) {
-        text += `\n\n...y ${files.length - 10} más.`;
-      }
-      return { text, resolvedBy: "system" };
+    const resolved = resolveCourse(courseHint, courses);
+    if (resolved.course) {
+      return executeIntentForCourse("files", resolved.course, canvas);
     }
-    if (matched.length > 1) {
-      const options = matched.map((c) => `📚 **${c.name}**`);
-      return {
-        text: `Hay varios cursos que coinciden. ¿Cuál?\n\n${options.join("\n")}`,
-        resolvedBy: "system",
-      };
+    if (resolved.candidates.length > 1 && userId) {
+      pendingActions.set(userId, {
+        type: "select_course", originalIntent: "files",
+        candidates: resolved.candidates, timestamp: Date.now(),
+      });
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
     }
   }
 
-  const options = courses.map((c) => `📚 **${c.name}**`);
+  // No hint or no match → ask with filtered academic courses
+  if (courses.length === 0) {
+    return { text: "No tienes cursos activos en Canvas.", resolvedBy: "system" };
+  }
+  if (userId) {
+    pendingActions.set(userId, {
+      type: "select_course", originalIntent: "files",
+      candidates: courses, timestamp: Date.now(),
+    });
+  }
+  const options = courses.map((c, i) => `${i + 1}. **${c.name}**`);
   return {
-    text: `📁 ¿De qué curso quieres ver los archivos?\n\n${options.join("\n")}`,
+    text: `¿De qué asignatura quieres ver los archivos?\n\n${options.join("\n")}`,
     resolvedBy: "system",
   };
 }
 
 async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> {
-  const courses = await canvas.getCourses();
+  const courses = filterAcademic(await canvas.getCourses());
 
   const [assignmentResults, events] = await Promise.all([
     Promise.all(
