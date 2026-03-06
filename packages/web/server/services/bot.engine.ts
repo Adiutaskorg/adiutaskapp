@@ -303,40 +303,54 @@ type Intent =
   | { type: "grades"; courseHint?: string }
   | { type: "assignments"; courseHint?: string }
   | { type: "events" }
-  | { type: "announcements" };
+  | { type: "announcements" }
+  | { type: "files"; courseHint?: string }
+  | { type: "overview" };
 
-// --- Regex patterns ---
+// --- Regex patterns (broad to minimize LLM fallback) ---
 
-const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos\s*(tengo|hay))\b/i;
-const GRADES_RE = /\b(mis\s*notas|calificaciones?|nota[s]?|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*voy)\b/i;
-const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente))\b/i;
-const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?))\b/i;
-const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?)\b/i;
+const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos|qu[eé]\s*estudio|listado?\s*de\s*cursos)\b/i;
+const GRADES_RE = /\b(mis\s*notas|calificaciones?|notas?\b|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*voy|qu[eé]\s*saqu[eé]|qu[eé]\s*he\s*sacado|media|promedio|resultados?)\b/i;
+const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente)|algo\s*pendiente|pr[oó]xima\s*entrega|cu[aá]ndo\s*entrego|fecha\s*de\s*entrega|trabajos?\s*(pendientes?)?|actividad(es)?\s*(pendientes?)?|cosas?\s*(pendientes?|por\s*hacer|que\s*hacer))\b/i;
+const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?|examen|ex[aá]menes)|cu[aá]ndo\s*(es|son|hay)\s*(el|los|un)?\s*(examen|parcial|final|prueba))\b/i;
+const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?|qu[eé]\s*hay\s*de\s*nuevo)\b/i;
+const FILES_RE = /\b(archivos?|documentos?|materiale?s?|ficheros?|pdfs?|apuntes?|recursos?|presentaci[oó]n(es)?|diapositivas?|temario|transparencias?)\b/i;
+const OVERVIEW_RE = /\b(resumen|ponme\s*al\s*d[ií]a|c[oó]mo\s*va\s*todo|qu[eé]\s*me\s*(espera|queda|falta)|estado\s*(general|actual)|vista\s*general)\b/i;
 const LINK_RE = /\b(vincular|conectar|enlazar|token)\b/i;
-const GREETING_RE = /^(hola|hey|buenas|buenos?\s*(d[ií]as?|tardes?|noches?)|qu[eé]\s*tal|saludos|hi|hello)\b/i;
-const THANKS_RE = /^(gracias|thanks?|genial|perfecto|guay|vale|ok[i]?|de\s*acuerdo|entendido|claro)\b/i;
-const GOODBYE_RE = /^(adi[oó]s|chao|bye|hasta\s*(luego|ma[nñ]ana|pronto)|nos\s*vemos)\b/i;
-const HELP_RE = /\b(ayuda|help|qu[eé]\s*puedes\s*(hacer|decir))\b/i;
+const GREETING_RE = /^(hola|hey|buenas|buenos?\s*(d[ií]as?|tardes?|noches?)|qu[eé]\s*tal|saludos|hi|hello|ey+|epa|wenas|qu[eé]\s*pasa|qu[eé]\s*hay|qu[eé]\s*onda)\b/i;
+const THANKS_RE = /^(gracias|thanks?|genial|perfecto|guay|vale|ok[i]?|de\s*acuerdo|entendido|claro|mola|top|bien|excelente|estupendo|fenomenal|s[uú]per|incre[ií]ble|much[ia]s?\s*gracias)\b/i;
+const GOODBYE_RE = /^(adi[oó]s|chao|bye|hasta\s*(luego|ma[nñ]ana|pronto|otra)|nos\s*vemos|me\s*voy|ya\s*est[aá]|eso\s*es\s*todo|nada\s*m[aá]s|cu[ií]date|chau)\b/i;
+const HELP_RE = /\b(ayuda|help|qu[eé]\s*puedes\s*(hacer|decir)|men[uú]|opciones|comandos|c[oó]mo\s*(funciona|te\s*uso|va\s*esto))\b/i;
+
+// Catch-all for very short messages that are likely simple interactions
+const SHORT_CHITCHAT_RE = /^(s[ií]|no|ya|ok|lol|jaja[ja]*|jeje[je]*|xd+|wow|\?+|[.]+)$/i;
 
 function detectIntent(message: string): Intent | null {
   const m = message.toLowerCase().trim();
 
-  // Canvas intents first (match anywhere in message)
+  // 1. Canvas data intents (match anywhere, checked first)
   if (COURSES_RE.test(m)) return { type: "courses" };
   if (GRADES_RE.test(m)) return { type: "grades", courseHint: extractCourseHint(m) };
   if (ASSIGNMENTS_RE.test(m)) return { type: "assignments", courseHint: extractCourseHint(m) };
   if (EVENTS_RE.test(m)) return { type: "events" };
   if (ANNOUNCEMENTS_RE.test(m)) return { type: "announcements" };
+  if (FILES_RE.test(m)) return { type: "files", courseHint: extractCourseHint(m) };
+  if (OVERVIEW_RE.test(m)) return { type: "overview" };
+
+  // 2. Account intents
   if (LINK_RE.test(m)) return { type: "link" };
 
-  // Chitchat (short messages only to avoid false positives)
-  if (m.length <= 60) {
-    if (GREETING_RE.test(m)) return { type: "greeting" };
-    if (THANKS_RE.test(m)) return { type: "thanks" };
-    if (GOODBYE_RE.test(m)) return { type: "goodbye" };
-  }
-
+  // 3. Chitchat / short interactions (no length limit)
+  if (GREETING_RE.test(m)) return { type: "greeting" };
+  if (THANKS_RE.test(m)) return { type: "thanks" };
+  if (GOODBYE_RE.test(m)) return { type: "goodbye" };
   if (HELP_RE.test(m)) return { type: "help" };
+  if (SHORT_CHITCHAT_RE.test(m)) return { type: "thanks" };
+
+  // 4. Broad catch: short ambiguous queries → overview
+  if (m.length <= 40 && /^(qu[eé]\s+(tengo|hay|me|tal)|d[ií]me|cu[eé]ntame|mu[eé]strame)/i.test(m)) {
+    return { type: "overview" };
+  }
 
   return null; // → LLM fallback
 }
@@ -374,7 +388,7 @@ function formatDateMadrid(iso: string): string {
 async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotResponse> {
   switch (intent.type) {
     case "greeting":
-      return { text: "👋 ¡Hola! ¿En qué puedo ayudarte hoy?", resolvedBy: "system" };
+      return { text: "👋 ¡Hola! ¿En qué puedo ayudarte hoy?\n\nEscribe **\"ayuda\"** para ver lo que puedo hacer.", resolvedBy: "system" };
     case "thanks":
       return { text: "😊 ¡De nada! Si necesitas algo más, aquí estoy.", resolvedBy: "system" };
     case "goodbye":
@@ -387,7 +401,9 @@ async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotRe
           '📊 **"Mis notas"** — consultar calificaciones\n' +
           '📝 **"Tareas pendientes"** — ver entregas próximas\n' +
           '📅 **"Eventos"** — consultar tu calendario\n' +
-          '📢 **"Anuncios"** — ver noticias de tus cursos\n\n' +
+          '📢 **"Anuncios"** — ver noticias de tus cursos\n' +
+          '📁 **"Archivos"** — ver materiales de tus cursos\n' +
+          '📋 **"Resumen"** — vista general de pendientes\n\n' +
           "También puedo responder preguntas más complejas sobre tus asignaturas.",
         resolvedBy: "system",
       };
@@ -406,6 +422,10 @@ async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotRe
       return await handleEventsIntent(canvas);
     case "announcements":
       return await handleAnnouncementsIntent(canvas);
+    case "files":
+      return await handleFilesIntent(canvas, intent.courseHint);
+    case "overview":
+      return await handleOverviewIntent(canvas);
   }
 }
 
@@ -550,4 +570,105 @@ async function handleAnnouncementsIntent(canvas: CanvasClient): Promise<BotRespo
   }
 
   return { text, resolvedBy: "system" };
+}
+
+async function handleFilesIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+
+  if (courseHint) {
+    const matched = matchCourses(courses, courseHint);
+    if (matched.length === 1) {
+      const course = matched[0];
+      const files = await canvas.getCourseFiles(course.id);
+      if (files.length === 0) {
+        return { text: `📁 No hay archivos en **${course.name}**.`, resolvedBy: "system" };
+      }
+      const shown = files.slice(0, 10);
+      const lines = shown.map((f) => {
+        const size = f.size > 0 ? ` (${(f.size / 1024).toFixed(0)} KB)` : "";
+        return `📄 **${f.display_name}**${size}`;
+      });
+      let text = `📁 **Archivos de ${course.name}** (${files.length}):\n\n${lines.join("\n")}`;
+      if (files.length > 10) {
+        text += `\n\n...y ${files.length - 10} más.`;
+      }
+      return { text, resolvedBy: "system" };
+    }
+    if (matched.length > 1) {
+      const options = matched.map((c) => `📚 **${c.name}**`);
+      return {
+        text: `Hay varios cursos que coinciden. ¿Cuál?\n\n${options.join("\n")}`,
+        resolvedBy: "system",
+      };
+    }
+  }
+
+  // No hint or no match — list courses to choose
+  const options = courses.map((c) => `📚 **${c.name}**`);
+  return {
+    text: `📁 ¿De qué curso quieres ver los archivos?\n\n${options.join("\n")}`,
+    resolvedBy: "system",
+  };
+}
+
+async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+
+  // Fetch pending assignments and events in parallel
+  const [assignmentResults, events] = await Promise.all([
+    Promise.all(
+      courses.map(async (c) => {
+        try {
+          const assignments = await canvas.getAssignments(c.id, true);
+          return assignments.map((a) => ({ ...a, courseName: c.name }));
+        } catch {
+          return [];
+        }
+      }),
+    ),
+    canvas.getUpcomingEvents(),
+  ]);
+
+  const pending = assignmentResults.flat();
+  pending.sort((a, b) => {
+    if (!a.due_at && !b.due_at) return 0;
+    if (!a.due_at) return 1;
+    if (!b.due_at) return -1;
+    return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+  });
+
+  const parts: string[] = [];
+
+  // Pending assignments summary
+  if (pending.length === 0) {
+    parts.push("✅ **Tareas:** No tienes tareas pendientes.");
+  } else {
+    const top = pending.slice(0, 3);
+    const lines = top.map((a) => {
+      const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha";
+      return `  📝 ${a.name} (${a.courseName}) — ${date}`;
+    });
+    parts.push(`📝 **Tareas pendientes (${pending.length}):**\n${lines.join("\n")}`);
+    if (pending.length > 3) {
+      parts.push(`  ...y ${pending.length - 3} más. Escribe **"tareas"** para verlas todas.`);
+    }
+  }
+
+  // Upcoming events summary
+  if (events.length === 0) {
+    parts.push("📅 **Eventos:** No hay eventos próximos.");
+  } else {
+    const top = events.slice(0, 3);
+    const lines = top.map((e) => {
+      const date = e.start_at ? formatDateMadrid(e.start_at) : "sin fecha";
+      const course = e.course_name ? ` (${e.course_name})` : "";
+      return `  📅 ${e.title}${course} — ${date}`;
+    });
+    parts.push(`📅 **Próximos eventos (${events.length}):**\n${lines.join("\n")}`);
+  }
+
+  return {
+    text: `📋 **Tu resumen:**\n\n${parts.join("\n\n")}`,
+    resolvedBy: "system",
+  };
 }
