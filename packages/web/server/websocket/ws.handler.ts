@@ -111,7 +111,9 @@ export const websocketHandler = {
           console.warn(`[WS] Unknown message type: ${data.type}`);
       }
     } catch (err) {
-      console.error("[WS] Message handling error:", err);
+      const error = err as Record<string, unknown>;
+      console.error(`[WS] Message handling error: [${error.name ?? "Error"}] ${(err as Error).message}`);
+      if ((err as Error).stack) console.error((err as Error).stack);
       send(ws, {
         type: "error",
         error: "Error procesando tu mensaje. Inténtalo de nuevo.",

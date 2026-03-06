@@ -3,6 +3,24 @@
 // HTTP API + WebSocket server
 // ============================================
 
+// Load .env from packages/web/ even when Bun is launched from the project root
+import { existsSync, readFileSync } from "fs";
+import { resolve, dirname } from "path";
+
+const __serverDir = dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Z]:)/, "$1");
+const __envPath = resolve(__serverDir, "..", ".env");
+if (existsSync(__envPath)) {
+  for (const line of readFileSync(__envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    if (!process.env[key]) process.env[key] = val;
+  }
+}
+
 import { authRoutes } from "./routes/auth.routes";
 import { dashboardRoutes } from "./routes/dashboard.routes";
 import { pushRoutes } from "./routes/push.routes";

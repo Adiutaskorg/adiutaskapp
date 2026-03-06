@@ -5,7 +5,7 @@ import type { ConversationMessage } from "../types/conversation";
 import type { Course } from "../types/canvas";
 
 const MODEL = "claude-sonnet-4-6";
-const MAX_TOOL_ITERATIONS = 12;
+const MAX_TOOL_ITERATIONS = 6;
 
 /** Raw file data collected during tool execution */
 export interface CollectedFile {
@@ -506,6 +506,9 @@ export class ClaudeProvider implements LLMProvider {
         if (response.stop_reason === "tool_use") {
           messages.push({ role: "assistant", content: response.content });
 
+          const toolBlocks = response.content.filter((b) => b.type === "tool_use");
+          console.log(`[AI] Iteration ${iterations}: ${toolBlocks.length} tool call(s) in parallel`);
+
           const toolResults: Anthropic.ToolResultBlockParam[] = [];
           for (const block of response.content) {
             if (block.type !== "tool_use") continue;
@@ -538,7 +541,22 @@ export class ClaudeProvider implements LLMProvider {
       console.warn(`[AI] Max tool iterations (${MAX_TOOL_ITERATIONS}) reached after ${Date.now() - start}ms`);
       return { text: "😅 Necesité demasiadas consultas para responder. ¿Puedes reformular tu pregunta de forma más concreta?", files: [] };
     } catch (err) {
-      console.error(`[ERROR] Claude API failed after ${Date.now() - start}ms:`, (err as Error).message);
+      const elapsed = Date.now() - start;
+      const error = err as Record<string, unknown>;
+      const status = error.status ?? error.statusCode ?? "unknown";
+      const errType = error.name ?? error.constructor?.name ?? "Error";
+      console.error(`[ERROR] Claude API failed after ${elapsed}ms: [${errType}] status=${status} ${(err as Error).message}`);
+
+      // Provide more specific error messages based on error type
+      if (status === 401 || status === 403) {
+        return { text: "⚠️ Error de autenticación con el servicio de IA. Contacta al administrador.", files: [] };
+      }
+      if (status === 429) {
+        return { text: "⏳ Demasiadas solicitudes al servicio de IA. Espera un momento e inténtalo de nuevo.", files: [] };
+      }
+      if (status === 529 || status === 503) {
+        return { text: "🔧 El servicio de IA está temporalmente sobrecargado. Inténtalo en unos minutos.", files: [] };
+      }
       return { text: "😅 Lo siento, estoy teniendo problemas técnicos. Inténtalo de nuevo en unos momentos.", files: [] };
     }
   }

@@ -147,10 +147,22 @@ export async function processMessage(userId: string, message: string): Promise<B
 
   const history = conversation.getHistory(userId);
 
+  // Validate LLM provider is available before entering try/catch
+  let llm: LLMProvider;
+  try {
+    llm = getLLMProvider();
+  } catch {
+    console.error("[BOT] ANTHROPIC_API_KEY is not configured — cannot process messages");
+    return {
+      text: "⚠️ El servicio de IA no está configurado. Contacta al administrador.",
+      resolvedBy: "system",
+      responseType: "error",
+    };
+  }
+
   try {
     // ========== LLM processing ==========
     console.log(`[BOT] LLM processing: "${trimmed.slice(0, 50)}"`);
-    const llm = getLLMProvider();
     const result = await llm.processMessageRich(message, canvas, history);
     conversation.addMessage(userId, "user", message);
     conversation.addMessage(userId, "assistant", result.text);
@@ -175,7 +187,10 @@ export async function processMessage(userId: string, message: string): Promise<B
         responseType: "error",
       };
     }
-    console.error(`[BOT] Error for user ${userId}:`, (err as Error).message);
+    const error = err as Record<string, unknown>;
+    const errType = error.name ?? error.constructor?.name ?? "Error";
+    console.error(`[BOT] Error for user ${userId}: [${errType}] ${(err as Error).message}`);
+    if ((err as Error).stack) console.error((err as Error).stack);
     return {
       text: "😅 Hubo un error procesando tu mensaje. Inténtalo de nuevo.",
       resolvedBy: "system",
