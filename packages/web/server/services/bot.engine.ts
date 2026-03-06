@@ -383,7 +383,7 @@ interface MatchedIntent {
 
 const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos|qu[eé]\s*estudio|listado?\s*de\s*cursos|en\s*qu[eé]\s*estoy\s*matriculad[oa])\b/i;
 const GRADES_RE = /\b(mis\s*notas|calificaciones?|notas?\b|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*(voy|estoy|llevo)|qu[eé]\s*saqu[eé]|qu[eé]\s*he\s*sacado|media|promedio|resultados?|expediente)\b/i;
-const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente)|algo\s*pendiente|pr[oó]xima\s*entrega|cu[aá]ndo\s*entrego|fecha\s*de\s*entrega|trabajos?\s*(pendientes?)?|actividad(es)?\s*(pendientes?)?|cosas?\s*(pendientes?|por\s*hacer|que\s*hacer)|qu[eé]\s*me\s*falta\s*(por\s*)?entregar)\b/i;
+const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente)|algo\s*pendiente|pr[oó]xima\s*entrega|cu[aá]ndo\s*entrego|fecha\s*de\s*entrega|trabajos?\s*(pendientes?)?|actividad(es)?\s*(pendientes?)?|cosas?\s*(pendientes?|por\s*hacer|que\s*hacer)|qu[eé]\s*me\s*falta\b(\s*(por\s*)?entregar)?)\b/i;
 const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?|examen|ex[aá]menes)|cu[aá]ndo\s*(es|son|hay|tengo)\s*(el\s+|los\s+|un\s+)?(examen|parcial|final|prueba|control)|parciale?s|finale?s)\b/i;
 const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?|qu[eé]\s*hay\s*de\s*nuevo|ha\s*(dicho|publicado|puesto|subido)\s*(algo\s*)?(el\s*)?profes?o?r?)\b/i;
 const FILES_RE = /\b(archivos?|documentos?|materiale?s?|ficheros?|pdfs?|apuntes?|recursos?|presentaci[oó]n(es)?|diapositivas?|temario|transparencias?)\b/i;
@@ -630,13 +630,43 @@ function diceCoefficient(a: string, b: string): number {
 }
 
 function extractCourseHint(message: string): string | undefined {
-  const m = message.match(/\b(?:de|en|para)\s+([^,;:!?\n]+)/i);
-  if (m) {
-    let hint = m[1].trim();
+  // 1. Preposition pattern: "archivos de mates", "notas en progra"
+  const prep = message.match(/\b(?:de|en|para)\s+([^,;:!?\n]+)/i);
+  if (prep) {
+    let hint = prep[1].trim();
     hint = hint.replace(/\b(por favor|please|gracias|pls)\b.*$/i, "").trim();
+    // Remove trailing intent words that leaked into the hint
+    hint = hint.replace(/\b(archivos?|notas?|tareas?|calificaciones?|pendientes?|documentos?|apuntes?|materiale?s?|pdfs?)\b/gi, "").trim();
     if (hint.length > 2) return hint;
   }
+
+  // 2. No-preposition: strip known intent keywords and see what's left
+  // Handles "archivos mates", "mates archivos", "notas progra", "tareas mates"
+  const intentWords = /\b(mis|los|las|dame|pasame|muestrame|ver|consultar|dime|quiero|archivos?|documentos?|apuntes?|materiale?s?|ficheros?|pdfs?|notas?|calificaciones?|tareas?|pendientes?|entregas?|deberes?|trabajos?|practicas?|actividades?|recursos?|presentaci[oó]n(?:es)?|diapositivas?|temario|transparencias?|qu[eé]|tengo|hay|como|c[oó]mo|voy|estoy|llevo|saqu[eé]|sacado|he|que|me|falta|por|entregar|hacer)\b/gi;
+  const stripped = message.replace(intentWords, "").replace(/\s+/g, " ").trim();
+  if (stripped.length > 2 && stripped.length < 50) return stripped;
+
   return undefined;
+}
+
+// ── Grade emoji helper ──
+
+function gradeEmoji(score: number | null): string {
+  if (score === null) return "⬜";
+  const nota = score / 10;
+  if (nota >= 5) return "🟢";
+  return "🔴";
+}
+
+/** Filter out fake/non-deliverable tasks (Participación, Asistencia, etc.) */
+function isRealTask(a: { name: string; submission_types?: string[] }): boolean {
+  // Skip if submission_types is only ["none"] or empty
+  if (a.submission_types && a.submission_types.length === 1 && a.submission_types[0] === "none") return false;
+  if (a.submission_types && a.submission_types.length === 0) return false;
+  // Skip common non-task names
+  const lower = a.name.toLowerCase();
+  if (/^(participaci[oó]n|asistencia|attendance|participation)\b/i.test(lower)) return false;
+  return true;
 }
 
 // ── Course normalization (strip accents, parenthetical content, punctuation) ──
@@ -797,11 +827,12 @@ function resolveCourse(query: string, courses: Course[]): CourseMatch | CourseNo
 // ── Execute intent for a specific resolved course ──
 
 async function executeIntentForCourse(intent: string, course: Course, canvas: CanvasClient): Promise<BotResponse> {
+  const cName = formatCourseName(course.name);
   switch (intent) {
     case "files": {
       const files = await canvas.getCourseFiles(course.id);
       if (files.length === 0) {
-        return { text: `No hay archivos en **${course.name}**.`, resolvedBy: "system" };
+        return { text: `No hay archivos en **${cName}**.`, resolvedBy: "system" };
       }
       const shown = files.slice(0, 10);
       const fileInfos = buildFileInfos(shown.map((f) => ({
@@ -811,7 +842,7 @@ async function executeIntentForCourse(intent: string, course: Course, canvas: Ca
         const size = f.size > 0 ? ` (${(f.size / 1024).toFixed(0)} KB)` : "";
         return `**${f.display_name}**${size}`;
       });
-      let text = `**Archivos de ${course.name}** (${files.length}):\n\n${lines.join("\n")}`;
+      let text = `**Archivos de ${cName}** (${files.length}):\n\n${lines.join("\n")}`;
       if (files.length > 10) text += `\n\n...y ${files.length - 10} más.`;
       const response: BotResponse = { text, resolvedBy: "system" };
       if (fileInfos.length > 0) {
@@ -824,19 +855,21 @@ async function executeIntentForCourse(intent: string, course: Course, canvas: Ca
       try {
         const grades = await canvas.getGrades(course.id);
         if (!grades || grades.current_score === null) {
-          return { text: `**${course.name}**: Sin calificación aún.`, resolvedBy: "system" };
+          return { text: `${gradeEmoji(null)} **${cName}**: Sin calificación aún.`, resolvedBy: "system" };
         }
-        const nota = (grades.current_score / 10).toFixed(1);
-        return { text: `**${course.name}**: **${nota} / 10**`, resolvedBy: "system" };
+        const score = Math.min(grades.current_score, 100); // Cap at 100
+        const nota = (score / 10).toFixed(1);
+        return { text: `${gradeEmoji(grades.current_score)} **${cName}**: **${nota} / 10**`, resolvedBy: "system" };
       } catch {
-        return { text: `No pude obtener las notas de **${course.name}**.`, resolvedBy: "system" };
+        return { text: `No pude obtener las notas de **${cName}**.`, resolvedBy: "system" };
       }
     }
     case "assignments": {
       try {
-        const assignments = await canvas.getAssignments(course.id, true);
+        const allAssignments = await canvas.getAssignments(course.id, true);
+        const assignments = allAssignments.filter(isRealTask);
         if (assignments.length === 0) {
-          return { text: `No tienes tareas pendientes en **${course.name}**.`, resolvedBy: "system" };
+          return { text: `No tienes tareas pendientes en **${cName}**.`, resolvedBy: "system" };
         }
         assignments.sort((a, b) => {
           if (!a.due_at && !b.due_at) return 0;
@@ -847,13 +880,13 @@ async function executeIntentForCourse(intent: string, course: Course, canvas: Ca
         const shown = assignments.slice(0, 7);
         const lines = shown.map((a) => {
           const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha límite";
-          return `**${a.name}**\n   Entrega: ${date}`;
+          return `📝 **${a.name}**\n   Entrega: ${date}`;
         });
-        let text = `**Tareas pendientes de ${course.name} (${assignments.length}):**\n\n${lines.join("\n\n")}`;
+        let text = `**Tareas pendientes de ${cName} (${assignments.length}):**\n\n${lines.join("\n\n")}`;
         if (assignments.length > 7) text += `\n\n...y ${assignments.length - 7} más.`;
         return { text, resolvedBy: "system" };
       } catch {
-        return { text: `No pude obtener las tareas de **${course.name}**.`, resolvedBy: "system" };
+        return { text: `No pude obtener las tareas de **${cName}**.`, resolvedBy: "system" };
       }
     }
     default:
@@ -861,8 +894,50 @@ async function executeIntentForCourse(intent: string, course: Course, canvas: Ca
   }
 }
 
+/** Clean Canvas course names: "MATEMÁTICAS I(INGLÉS)" → "Matemáticas I" */
+function formatCourseName(name: string): string {
+  return name
+    .replace(/\([^)]*\)/g, "")       // Remove parenthetical (INGLÉS), (GR. A), etc.
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(.)(.*?)$/g, (_m, first, rest) => {
+      // Title case: first letter upper, rest of each word lower (preserving Roman numerals)
+      const words = (first + rest).split(" ");
+      return words.map((w) => {
+        if (/^[IVXLC]+$/.test(w)) return w; // Roman numerals stay uppercase
+        if (w.length <= 2 && /^(de|en|la|el|y|a|al|del)$/i.test(w)) return w.toLowerCase();
+        return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+      }).join(" ");
+    });
+}
+
 function formatDateMadrid(iso: string): string {
-  return new Date(iso).toLocaleString("es-ES", {
+  const date = new Date(iso);
+  const now = new Date();
+
+  // Convert both to Madrid timezone for comparison
+  const madridOpts: Intl.DateTimeFormatOptions = { timeZone: "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit" };
+  const dateStr = date.toLocaleDateString("en-CA", madridOpts); // YYYY-MM-DD
+  const todayStr = now.toLocaleDateString("en-CA", madridOpts);
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = tomorrow.toLocaleDateString("en-CA", madridOpts);
+
+  const timeStr = date.toLocaleString("es-ES", { timeZone: "Europe/Madrid", hour: "2-digit", minute: "2-digit" });
+
+  if (dateStr === todayStr) return `hoy a las ${timeStr}`;
+  if (dateStr === tomorrowStr) return `mañana a las ${timeStr}`;
+
+  // Check if within this week (next 6 days)
+  const diffMs = date.getTime() - now.getTime();
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  if (diffDays > 0 && diffDays <= 6) {
+    const weekday = date.toLocaleString("es-ES", { timeZone: "Europe/Madrid", weekday: "long" });
+    return `${weekday} a las ${timeStr}`;
+  }
+
+  return date.toLocaleString("es-ES", {
     timeZone: "Europe/Madrid",
     weekday: "long",
     day: "numeric",
@@ -946,7 +1021,7 @@ async function handleCoursesIntent(canvas: CanvasClient): Promise<BotResponse> {
   if (courses.length === 0) {
     return { text: "No tienes cursos activos en Canvas.", resolvedBy: "system" };
   }
-  const lines = courses.map((c) => `**${c.name}** (${c.course_code})`);
+  const lines = courses.map((c) => `📚 **${formatCourseName(c.name)}**`);
   return {
     text: `Tienes **${courses.length} asignatura${courses.length !== 1 ? "s" : ""}**:\n\n${lines.join("\n")}`,
     resolvedBy: "system",
@@ -966,7 +1041,7 @@ async function handleGradesIntent(canvas: CanvasClient, courseHint?: string, use
         type: "select_course", originalIntent: "grades",
         candidates: resolved.candidates, timestamp: Date.now(),
       });
-      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${formatCourseName(c.name)}**`);
       return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
     }
     // No match → show all grades
@@ -983,11 +1058,13 @@ async function handleGradesIntent(canvas: CanvasClient, courseHint?: string, use
   );
 
   const lines = results.map(({ course, grades }) => {
+    const cName = formatCourseName(course.name);
     if (!grades || grades.current_score === null) {
-      return `**${course.name}**: Sin calificación aún`;
+      return `${gradeEmoji(null)} **${cName}**: Sin calificación aún`;
     }
-    const nota = (grades.current_score / 10).toFixed(1);
-    return `**${course.name}**: **${nota} / 10**`;
+    const score = Math.min(grades.current_score, 100);
+    const nota = (score / 10).toFixed(1);
+    return `${gradeEmoji(grades.current_score)} **${cName}**: **${nota} / 10**`;
   });
 
   return {
@@ -1009,7 +1086,7 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
         type: "select_course", originalIntent: "assignments",
         candidates: resolved.candidates, timestamp: Date.now(),
       });
-      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${formatCourseName(c.name)}**`);
       return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
     }
     // No match → show all
@@ -1019,7 +1096,9 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
     courses.map(async (c) => {
       try {
         const assignments = await canvas.getAssignments(c.id, true);
-        return assignments.map((a) => ({ ...a, courseName: c.name }));
+        return assignments
+          .filter(isRealTask)
+          .map((a) => ({ ...a, courseName: formatCourseName(c.name) }));
       } catch {
         return [];
       }
@@ -1041,7 +1120,7 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
   const shown = all.slice(0, 7);
   const lines = shown.map((a) => {
     const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha límite";
-    return `**${a.name}** (${a.courseName})\n   Entrega: ${date}`;
+    return `📝 **${a.name}** (${a.courseName})\n   Entrega: ${date}`;
   });
 
   let text = `**Tareas pendientes (${all.length}):**\n\n${lines.join("\n\n")}`;
@@ -1116,7 +1195,7 @@ async function handleFilesIntent(canvas: CanvasClient, courseHint?: string, user
         type: "select_course", originalIntent: "files",
         candidates: resolved.candidates, timestamp: Date.now(),
       });
-      const options = resolved.candidates.map((c, i) => `${i + 1}. **${c.name}**`);
+      const options = resolved.candidates.map((c, i) => `${i + 1}. **${formatCourseName(c.name)}**`);
       return { text: `He encontrado varias asignaturas:\n\n${options.join("\n")}\n\n¿Cuál quieres?`, resolvedBy: "system" };
     }
   }
@@ -1131,7 +1210,7 @@ async function handleFilesIntent(canvas: CanvasClient, courseHint?: string, user
       candidates: courses, timestamp: Date.now(),
     });
   }
-  const options = courses.map((c, i) => `${i + 1}. **${c.name}**`);
+  const options = courses.map((c, i) => `${i + 1}. **${formatCourseName(c.name)}**`);
   return {
     text: `¿De qué asignatura quieres ver los archivos?\n\n${options.join("\n")}`,
     resolvedBy: "system",
@@ -1146,7 +1225,9 @@ async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> 
       courses.map(async (c) => {
         try {
           const assignments = await canvas.getAssignments(c.id, true);
-          return assignments.map((a) => ({ ...a, courseName: c.name }));
+          return assignments
+            .filter(isRealTask)
+            .map((a) => ({ ...a, courseName: formatCourseName(c.name) }));
         } catch {
           return [];
         }
