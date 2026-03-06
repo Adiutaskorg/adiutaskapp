@@ -25,6 +25,7 @@ import { authRoutes } from "./routes/auth.routes";
 import { dashboardRoutes } from "./routes/dashboard.routes";
 import { pushRoutes } from "./routes/push.routes";
 import { fileRoutes } from "./routes/file.routes";
+import { adminRoutes } from "./routes/admin.routes";
 import { handleWebSocketUpgrade, websocketHandler } from "./websocket/ws.handler";
 import { verifyJWT, verifyJWTToken } from "./middleware/auth.middleware";
 import { initDatabase } from "./db/database";
@@ -113,6 +114,8 @@ Bun.serve({
         const authResult = await verifyJWT(req);
         if (!authResult.ok) {
           response = json({ error: "No autorizado" }, 401);
+        } else if (path.startsWith("/api/admin")) {
+          response = await adminRoutes(req, url, authResult.userId, authResult.email);
         } else if (path.startsWith("/api/dashboard")) {
           response = await dashboardRoutes(req, url, authResult.userId);
         } else if (path.startsWith("/api/push")) {

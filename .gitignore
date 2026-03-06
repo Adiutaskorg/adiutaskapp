@@ -1,6 +1,47 @@
-node_modules
-dist
+# Dependencias
+node_modules/
+
+# Build / Output
+dist/
+build/
+.output/
+
+# Variables de entorno
 .env
+.env.*
+!.env.example
+
+# Base de datos SQLite
 *.db
 *.db-shm
 *.db-wal
+data/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs / Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Vite
+packages/web/node_modules/.vite/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Archivos temporales
+*.tmp
+*.temp
+.cache/
+
+# Credenciales / Secretos
+*.pem
+*.key
+credentials.json

@@ -1,7 +1,8 @@
 // ============================================
-// Bot Engine — Intent-first architecture
-// Common queries resolved via Canvas API directly
-// LLM used only as fallback for complex queries
+// Bot Engine — 3-Tier intent routing
+// Tier 1: regex/keyword → direct Canvas API
+// Tier 2: fuzzy similarity → direct Canvas API
+// Tier 3: LLM fallback (last resort)
 // ============================================
 
 import {
@@ -10,7 +11,7 @@ import {
   type Course,
 } from "@adiutask/core";
 import { ConversationStore } from "./conversation";
-import { getUserCanvasToken, saveCanvasToken } from "../db/database";
+import { getUserCanvasToken, saveCanvasToken, recordRouting } from "../db/database";
 import { getFileType, humanizeSize } from "@shared/file-utils";
 import type { FileInfo } from "@shared/types";
 
@@ -60,21 +61,11 @@ const CANVAS_TOKEN_REGEX = /\d+~[A-Za-z0-9]{20,}/;
 // Fallback: any 40+ char alphanumeric+tilde string (for edge cases)
 const GENERIC_TOKEN_REGEX = /^[A-Za-z0-9~]{40,}$/;
 
-/**
- * Extract a Canvas API token from a message.
- * Handles: bare token, "mi token es X", "token: X", "aquí tienes X", etc.
- * Returns the token string or null if no token found.
- * NEVER passes token content to the LLM.
- */
 function extractCanvasToken(message: string): string | null {
-  // Try the specific Canvas format first (most reliable)
   const match = message.match(CANVAS_TOKEN_REGEX);
   if (match) return match[0];
-
-  // If the whole message is a long alphanumeric string, treat as token
   const trimmed = message.trim();
   if (GENERIC_TOKEN_REGEX.test(trimmed)) return trimmed;
-
   return null;
 }
 
@@ -88,7 +79,6 @@ export interface BotResponse {
 
 /** Convert collected raw files to FileInfo[] for the frontend */
 function buildFileInfos(files: CollectedFile[]): FileInfo[] {
-  // Deduplicate by id
   const seen = new Set<number>();
   const result: FileInfo[] = [];
   for (const f of files) {
@@ -110,24 +100,28 @@ function buildFileInfos(files: CollectedFile[]): FileInfo[] {
 }
 
 /**
- * Process a user message — intent routing first, LLM as fallback.
+ * Process a user message — 3-tier routing: regex → fuzzy → LLM.
  */
 export async function processMessage(userId: string, message: string): Promise<BotResponse> {
   const trimmed = message.trim();
+  const startTime = performance.now();
 
   // --- Token detection (FIRST — intercept before anything, never pass to LLM) ---
   const extractedToken = extractCanvasToken(trimmed);
   if (extractedToken) {
-    awaitingToken.delete(userId); // clear awaiting state if present
+    awaitingToken.delete(userId);
     console.log(`[BOT] Canvas token detected for user ${userId} (${extractedToken.slice(0, 4)}...)`);
-    return await handleTokenValidation(userId, extractedToken);
+    const res = await handleTokenValidation(userId, extractedToken);
+    recordMetric("interceptor", "token_detect", userId, trimmed, startTime);
+    return res;
   }
 
-  // --- Token linking flow (user was asked to paste token, but sent non-token text) ---
+  // --- Token linking flow ---
   if (awaitingToken.has(userId)) {
     awaitingToken.delete(userId);
+    recordMetric("interceptor", "token_awaiting", userId, trimmed, startTime);
     return {
-      text: "❌ Eso no parece un token de Canvas. El token es una cadena larga de caracteres alfanuméricos.\n\nInténtalo de nuevo o escribe **\"vincular\"** para ver las instrucciones.",
+      text: "Eso no parece un token de Canvas. El token es una cadena larga de caracteres alfanuméricos.\n\nInténtalo de nuevo o escribe **\"vincular\"** para ver las instrucciones.",
       resolvedBy: "system",
       responseType: "error",
     };
@@ -137,7 +131,9 @@ export async function processMessage(userId: string, message: string): Promise<B
   const canvasToken = await getUserCanvasToken(userId);
 
   if (!canvasToken) {
-    return handleNoToken(trimmed, userId);
+    const res = handleNoToken(trimmed, userId);
+    recordMetric("tier1", "no_token:" + (res.responseType || "info"), userId, trimmed, startTime);
+    return res;
   }
 
   // Get or create Canvas client for this user
@@ -147,67 +143,92 @@ export async function processMessage(userId: string, message: string): Promise<B
     canvasClients.set(userId, canvas);
   }
 
-  // --- Intent-based routing (skip LLM for common queries) ---
-  const intent = detectIntent(trimmed);
-  if (intent) {
+  // --- TIER 1: Regex/keyword pattern matching ---
+  const tier1 = detectIntentTier1(trimmed);
+  if (tier1) {
     try {
-      console.log(`[BOT] Intent: ${intent.type} (direct, no LLM)`);
-      const directResponse = await handleIntent(intent, canvas);
+      console.log(`[BOT] Tier1 intent: ${tier1.id} (regex, no LLM)`);
+      const directResponse = await handleIntent(tier1, canvas);
       conversation.addMessage(userId, "user", message);
       conversation.addMessage(userId, "assistant", directResponse.text);
+      recordMetric("tier1", tier1.id, userId, trimmed, startTime);
       return directResponse;
     } catch (err) {
       if (err instanceof TokenExpiredError) {
         canvasClients.delete(userId);
+        recordMetric("tier1", "token_expired", userId, trimmed, startTime);
         return {
           text: "Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
           resolvedBy: "system",
           responseType: "error",
         };
       }
-      // Non-fatal: fall through to LLM
-      console.log(`[BOT] Intent handler failed, falling back to LLM: ${(err as Error).message}`);
+      console.log(`[BOT] Tier1 handler failed, trying Tier2: ${(err as Error).message}`);
     }
   }
 
+  // --- TIER 2: Fuzzy similarity matching ---
+  const tier2 = detectIntentTier2(trimmed);
+  if (tier2) {
+    try {
+      console.log(`[BOT] Tier2 intent: ${tier2.id} (fuzzy score=${tier2.score.toFixed(2)}, no LLM)`);
+      const directResponse = await handleIntent(tier2, canvas);
+      conversation.addMessage(userId, "user", message);
+      conversation.addMessage(userId, "assistant", directResponse.text);
+      recordMetric("tier2", tier2.id, userId, trimmed, startTime);
+      return directResponse;
+    } catch (err) {
+      if (err instanceof TokenExpiredError) {
+        canvasClients.delete(userId);
+        recordMetric("tier2", "token_expired", userId, trimmed, startTime);
+        return {
+          text: "Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
+          resolvedBy: "system",
+          responseType: "error",
+        };
+      }
+      console.log(`[BOT] Tier2 handler failed, falling back to LLM: ${(err as Error).message}`);
+    }
+  }
+
+  // --- TIER 3: LLM fallback (last resort) ---
   const history = conversation.getHistory(userId);
 
-  // Validate LLM provider is available before entering try/catch
   let llm: LLMProvider;
   try {
     llm = getLLMProvider();
   } catch {
     console.error("[BOT] ANTHROPIC_API_KEY is not configured — cannot process messages");
+    recordMetric("tier3", "llm_unavailable", userId, trimmed, startTime);
     return {
-      text: "⚠️ El servicio de IA no está configurado. Contacta al administrador.",
+      text: "El servicio de IA no está configurado. Contacta al administrador.",
       resolvedBy: "system",
       responseType: "error",
     };
   }
 
   try {
-    // ========== LLM processing ==========
-    console.log(`[BOT] LLM processing: "${trimmed.slice(0, 50)}"`);
+    console.log(`[BOT] Tier3 LLM fallback: "${trimmed.slice(0, 60)}"`);
     const result = await llm.processMessageRich(message, canvas, history);
     conversation.addMessage(userId, "user", message);
     conversation.addMessage(userId, "assistant", result.text);
 
-    // Build response with file metadata if files were collected
     const response: BotResponse = { text: result.text, resolvedBy: "llm" };
     if (result.files.length > 0) {
       const fileInfos = buildFileInfos(result.files);
       if (fileInfos.length > 0) {
         response.responseType = "file_list";
         response.metadata = { files: fileInfos };
-        console.log(`[BOT] Attached ${fileInfos.length} files to response`);
       }
     }
+    // Record with message text for Tier3 analysis
+    recordMetric("tier3", "llm_fallback", userId, trimmed, startTime, trimmed);
     return response;
   } catch (err) {
     if (err instanceof TokenExpiredError) {
       canvasClients.delete(userId);
       return {
-        text: "⚠️ Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
+        text: "Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
         resolvedBy: "system",
         responseType: "error",
       };
@@ -216,15 +237,34 @@ export async function processMessage(userId: string, message: string): Promise<B
     const errType = error.name ?? error.constructor?.name ?? "Error";
     console.error(`[BOT] Error for user ${userId}: [${errType}] ${(err as Error).message}`);
     if ((err as Error).stack) console.error((err as Error).stack);
+    recordMetric("tier3", "llm_error", userId, trimmed, startTime, trimmed);
     return {
-      text: "😅 Hubo un error procesando tu mensaje. Inténtalo de nuevo.",
+      text: "Hubo un error procesando tu mensaje. Inténtalo de nuevo.",
       resolvedBy: "system",
       responseType: "error",
     };
   }
 }
 
-// --- Handle messages when user has no Canvas token ---
+// ── Metrics helper ──
+
+function recordMetric(
+  tier: string,
+  intentId: string,
+  userId: string,
+  message: string,
+  startTime: number,
+  messageText?: string,
+): void {
+  try {
+    const ms = Math.round(performance.now() - startTime);
+    recordRouting(tier, intentId, userId, message.length, ms, messageText);
+  } catch {
+    // Non-critical — don't break message handling if metrics fail
+  }
+}
+
+// ── No-token handler ──
 
 function handleNoToken(message: string, userId: string): BotResponse {
   const normalized = message.toLowerCase().trim();
@@ -232,7 +272,7 @@ function handleNoToken(message: string, userId: string): BotResponse {
   if (normalized.includes("vincular") || normalized.includes("token") || normalized.includes("conectar")) {
     awaitingToken.add(userId);
     return {
-      text: "🔗 Para vincular tu cuenta de Canvas, envíame tu token en el siguiente mensaje.\n\n" +
+      text: "Para vincular tu cuenta de Canvas, envíame tu token en el siguiente mensaje.\n\n" +
         "Para obtenerlo:\n" +
         "1. Entra a https://ufv-es.instructure.com\n" +
         "2. Ve a **Perfil > Configuración > Tokens de acceso**\n" +
@@ -244,7 +284,7 @@ function handleNoToken(message: string, userId: string): BotResponse {
   if (normalized.includes("hola") || normalized.includes("hey") || normalized.includes("buenas") ||
       normalized.includes("ayuda") || normalized.includes("help")) {
     return {
-      text: "👋 **¡Hola! Soy adiutask**, tu asistente para Canvas UFV.\n\n" +
+      text: "**¡Hola! Soy adiutask**, tu asistente para Canvas UFV.\n\n" +
         "Para empezar, necesitas vincular tu cuenta de Canvas.\n" +
         "Escribe **\"vincular\"** para conectar tu cuenta.",
       resolvedBy: "system",
@@ -252,13 +292,13 @@ function handleNoToken(message: string, userId: string): BotResponse {
   }
 
   return {
-    text: "⚠️ No tienes tu cuenta de Canvas vinculada.\n\n" +
+    text: "No tienes tu cuenta de Canvas vinculada.\n\n" +
       "Necesito tu token para consultar tus datos. Escribe **\"vincular\"** para empezar.",
     resolvedBy: "system",
   };
 }
 
-// --- Token validation ---
+// ── Token validation ──
 
 async function handleTokenValidation(userId: string, token: string): Promise<BotResponse> {
   const canvas = new CanvasClient(CANVAS_BASE_URL, token);
@@ -268,20 +308,20 @@ async function handleTokenValidation(userId: string, token: string): Promise<Bot
     canvasClients.set(userId, canvas);
     console.log(`[BOT] User ${userId} linked Canvas account: ${profile.name}`);
     return {
-      text: `✅ **¡Cuenta vinculada!**\n\nBienvenido/a, **${profile.name}** 👋\nYa puedes preguntarme sobre tus cursos, tareas, notas y más.`,
+      text: `**¡Cuenta vinculada!**\n\nBienvenido/a, **${profile.name}**\nYa puedes preguntarme sobre tus cursos, tareas, notas y más.`,
       resolvedBy: "system",
     };
   } catch (err) {
     if (err instanceof TokenExpiredError) {
       return {
-        text: "❌ El token no es válido. Verifica que lo copiaste correctamente y que no ha expirado.",
+        text: "El token no es válido. Verifica que lo copiaste correctamente y que no ha expirado.",
         resolvedBy: "system",
         responseType: "error",
       };
     }
     console.error(`[BOT] Token validation failed for user ${userId}:`, (err as Error).message);
     return {
-      text: "❌ Error al validar el token. Inténtalo de nuevo.",
+      text: "Error al validar el token. Inténtalo de nuevo.",
       resolvedBy: "system",
       responseType: "error",
     };
@@ -289,74 +329,268 @@ async function handleTokenValidation(userId: string, token: string): Promise<Bot
 }
 
 // ============================================
-// Intent-based routing — resolves common
-// queries directly via Canvas APIs (no LLM)
+// TIER 1: Regex/keyword pattern matching
 // ============================================
 
-type Intent =
-  | { type: "greeting" }
-  | { type: "thanks" }
-  | { type: "goodbye" }
-  | { type: "help" }
-  | { type: "link" }
-  | { type: "courses" }
-  | { type: "grades"; courseHint?: string }
-  | { type: "assignments"; courseHint?: string }
-  | { type: "events" }
-  | { type: "announcements" }
-  | { type: "files"; courseHint?: string }
-  | { type: "overview" };
+interface MatchedIntent {
+  id: string;
+  type: string;
+  courseHint?: string;
+  score: number; // 1.0 for Tier 1, 0-1 for Tier 2
+}
 
 // --- Regex patterns (broad to minimize LLM fallback) ---
 
-const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos|qu[eé]\s*estudio|listado?\s*de\s*cursos)\b/i;
-const GRADES_RE = /\b(mis\s*notas|calificaciones?|notas?\b|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*voy|qu[eé]\s*saqu[eé]|qu[eé]\s*he\s*sacado|media|promedio|resultados?)\b/i;
-const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente)|algo\s*pendiente|pr[oó]xima\s*entrega|cu[aá]ndo\s*entrego|fecha\s*de\s*entrega|trabajos?\s*(pendientes?)?|actividad(es)?\s*(pendientes?)?|cosas?\s*(pendientes?|por\s*hacer|que\s*hacer))\b/i;
-const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?|examen|ex[aá]menes)|cu[aá]ndo\s*(es|son|hay)\s*(el|los|un)?\s*(examen|parcial|final|prueba))\b/i;
-const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?|qu[eé]\s*hay\s*de\s*nuevo)\b/i;
+const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos|qu[eé]\s*estudio|listado?\s*de\s*cursos|en\s*qu[eé]\s*estoy\s*matriculad[oa])\b/i;
+const GRADES_RE = /\b(mis\s*notas|calificaciones?|notas?\b|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*(voy|estoy|llevo)|qu[eé]\s*saqu[eé]|qu[eé]\s*he\s*sacado|media|promedio|resultados?|expediente)\b/i;
+const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente)|algo\s*pendiente|pr[oó]xima\s*entrega|cu[aá]ndo\s*entrego|fecha\s*de\s*entrega|trabajos?\s*(pendientes?)?|actividad(es)?\s*(pendientes?)?|cosas?\s*(pendientes?|por\s*hacer|que\s*hacer)|qu[eé]\s*me\s*falta\s*(por\s*)?entregar)\b/i;
+const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?|examen|ex[aá]menes)|cu[aá]ndo\s*(es|son|hay|tengo)\s*(el\s+|los\s+|un\s+)?(examen|parcial|final|prueba|control)|parciale?s|finale?s)\b/i;
+const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?|qu[eé]\s*hay\s*de\s*nuevo|ha\s*(dicho|publicado|puesto|subido)\s*(algo\s*)?(el\s*)?profes?o?r?)\b/i;
 const FILES_RE = /\b(archivos?|documentos?|materiale?s?|ficheros?|pdfs?|apuntes?|recursos?|presentaci[oó]n(es)?|diapositivas?|temario|transparencias?)\b/i;
 const OVERVIEW_RE = /\b(resumen|ponme\s*al\s*d[ií]a|c[oó]mo\s*va\s*todo|qu[eé]\s*me\s*(espera|queda|falta)|estado\s*(general|actual)|vista\s*general)\b/i;
 const LINK_RE = /\b(vincular|conectar|enlazar|token)\b/i;
-const GREETING_RE = /^(hola|hey|buenas|buenos?\s*(d[ií]as?|tardes?|noches?)|qu[eé]\s*tal|saludos|hi|hello|ey+|epa|wenas|qu[eé]\s*pasa|qu[eé]\s*hay|qu[eé]\s*onda)\b/i;
-const THANKS_RE = /^(gracias|thanks?|genial|perfecto|guay|vale|ok[i]?|de\s*acuerdo|entendido|claro|mola|top|bien|excelente|estupendo|fenomenal|s[uú]per|incre[ií]ble|much[ia]s?\s*gracias)\b/i;
+
+const GREETING_RE = /^(hola|hey|buenas|buenos?\s*(d[ií]as?|tardes?|noches?)|qu[eé]\s*tal|saludos|hi|hello|ey+|epa|wenas|qu[eé]\s*pasa|qu[eé]\s*hay|qu[eé]\s*onda|c[oó]mo\s*(est[aá]s|va|andas))\b/i;
+const THANKS_RE = /^(gracias|thanks?|genial|perfecto|guay|vale|ok[i]?|de\s*acuerdo|entendido|claro|mola|top|bien|excelente|estupendo|fenomenal|s[uú]per|incre[ií]ble|much[ia]s?\s*gracias|vale\s*gracias|ok\s*gracias)\b/i;
 const GOODBYE_RE = /^(adi[oó]s|chao|bye|hasta\s*(luego|ma[nñ]ana|pronto|otra)|nos\s*vemos|me\s*voy|ya\s*est[aá]|eso\s*es\s*todo|nada\s*m[aá]s|cu[ií]date|chau)\b/i;
 const HELP_RE = /\b(ayuda|help|qu[eé]\s*puedes\s*(hacer|decir)|men[uú]|opciones|comandos|c[oó]mo\s*(funciona|te\s*uso|va\s*esto))\b/i;
-
-// Catch-all for very short messages that are likely simple interactions
 const SHORT_CHITCHAT_RE = /^(s[ií]|no|ya|ok|lol|jaja[ja]*|jeje[je]*|xd+|wow|\?+|[.]+)$/i;
 
-function detectIntent(message: string): Intent | null {
+// Time-based queries
+const TODAY_RE = /\b(qu[eé]\s*(tengo|hay|toca)\s*hoy|hoy\s*qu[eé]|clases?\s*de\s*hoy|horario\s*(de\s*)?hoy|agenda\s*de\s*hoy)\b/i;
+const TOMORROW_RE = /\b(qu[eé]\s*(tengo|hay|toca)\s*ma[nñ]ana|ma[nñ]ana\s*qu[eé]|clases?\s*de\s*ma[nñ]ana)\b/i;
+const THIS_WEEK_RE = /\b(qu[eé]\s*(tengo|hay)\s*(esta\s*)?semana|esta\s*semana|horario\s*semanal|mi\s*semana|planning|agenda\s*(de\s*la\s*)?semana)\b/i;
+
+function detectIntentTier1(message: string): MatchedIntent | null {
   const m = message.toLowerCase().trim();
 
-  // 1. Canvas data intents (match anywhere, checked first)
-  if (COURSES_RE.test(m)) return { type: "courses" };
-  if (GRADES_RE.test(m)) return { type: "grades", courseHint: extractCourseHint(m) };
-  if (ASSIGNMENTS_RE.test(m)) return { type: "assignments", courseHint: extractCourseHint(m) };
-  if (EVENTS_RE.test(m)) return { type: "events" };
-  if (ANNOUNCEMENTS_RE.test(m)) return { type: "announcements" };
-  if (FILES_RE.test(m)) return { type: "files", courseHint: extractCourseHint(m) };
-  if (OVERVIEW_RE.test(m)) return { type: "overview" };
+  // Canvas data intents (highest priority, checked first)
+  if (COURSES_RE.test(m)) return { id: "courses", type: "courses", courseHint: extractCourseHint(m), score: 1 };
 
-  // 2. Account intents
-  if (LINK_RE.test(m)) return { type: "link" };
+  // Time-based queries (before generic patterns to capture "qué tengo hoy" correctly)
+  if (TODAY_RE.test(m)) return { id: "overview_today", type: "overview", score: 1 };
+  if (TOMORROW_RE.test(m)) return { id: "overview_tomorrow", type: "overview", score: 1 };
+  if (THIS_WEEK_RE.test(m)) return { id: "overview_week", type: "overview", score: 1 };
 
-  // 3. Chitchat / short interactions (no length limit)
-  if (GREETING_RE.test(m)) return { type: "greeting" };
-  if (THANKS_RE.test(m)) return { type: "thanks" };
-  if (GOODBYE_RE.test(m)) return { type: "goodbye" };
-  if (HELP_RE.test(m)) return { type: "help" };
-  if (SHORT_CHITCHAT_RE.test(m)) return { type: "thanks" };
+  if (GRADES_RE.test(m)) return { id: "grades", type: "grades", courseHint: extractCourseHint(m), score: 1 };
+  if (ASSIGNMENTS_RE.test(m)) return { id: "assignments", type: "assignments", courseHint: extractCourseHint(m), score: 1 };
+  if (EVENTS_RE.test(m)) return { id: "events", type: "events", score: 1 };
+  if (ANNOUNCEMENTS_RE.test(m)) return { id: "announcements", type: "announcements", score: 1 };
+  if (FILES_RE.test(m)) return { id: "files", type: "files", courseHint: extractCourseHint(m), score: 1 };
+  if (OVERVIEW_RE.test(m)) return { id: "overview", type: "overview", score: 1 };
 
-  // 4. Broad catch: short ambiguous queries → overview
-  if (m.length <= 40 && /^(qu[eé]\s+(tengo|hay|me|tal)|d[ií]me|cu[eé]ntame|mu[eé]strame)/i.test(m)) {
-    return { type: "overview" };
+  // Account
+  if (LINK_RE.test(m)) return { id: "link", type: "link", score: 1 };
+
+  // Chitchat
+  if (GREETING_RE.test(m)) return { id: "greeting", type: "greeting", score: 1 };
+  if (THANKS_RE.test(m)) return { id: "thanks", type: "thanks", score: 1 };
+  if (GOODBYE_RE.test(m)) return { id: "goodbye", type: "goodbye", score: 1 };
+  if (HELP_RE.test(m)) return { id: "help", type: "help", score: 1 };
+  if (SHORT_CHITCHAT_RE.test(m)) return { id: "short_chitchat", type: "thanks", score: 1 };
+
+  // Broad catch: short ambiguous queries → overview
+  if (m.length <= 50 && /^(qu[eé]\s+(tengo|hay|me|tal)|d[ií]me|cu[eé]ntame|mu[eé]strame|ensé[nñ]ame)/i.test(m)) {
+    return { id: "overview_vague", type: "overview", score: 1 };
   }
 
-  return null; // → LLM fallback
+  return null;
+}
+
+// ============================================
+// TIER 2: Fuzzy similarity matching
+// ============================================
+
+// Precomputed normalized phrases → intent mapping
+const FUZZY_CATALOG: { norm: string; intent: MatchedIntent }[] = buildFuzzyCatalog();
+
+function buildFuzzyCatalog(): { norm: string; intent: MatchedIntent }[] {
+  const entries: [string, MatchedIntent][] = [
+    // ── Notas ──
+    ["mis notas", { id: "grades", type: "grades", score: 0 }],
+    ["como voy de notas", { id: "grades", type: "grades", score: 0 }],
+    ["que notas tengo", { id: "grades", type: "grades", score: 0 }],
+    ["mis calificaciones", { id: "grades", type: "grades", score: 0 }],
+    ["como estoy en las asignaturas", { id: "grades", type: "grades", score: 0 }],
+    ["como llevo el curso", { id: "grades", type: "grades", score: 0 }],
+    ["nota media", { id: "grades", type: "grades", score: 0 }],
+    ["ver mis notas", { id: "grades", type: "grades", score: 0 }],
+    ["consultar notas", { id: "grades", type: "grades", score: 0 }],
+    ["dime mis notas", { id: "grades", type: "grades", score: 0 }],
+    ["quiero ver mis notas", { id: "grades", type: "grades", score: 0 }],
+    ["dame mis calificaciones", { id: "grades", type: "grades", score: 0 }],
+    ["ensenname mis notas", { id: "grades", type: "grades", score: 0 }],
+    ["expediente academico", { id: "grades", type: "grades", score: 0 }],
+    ["resumen de notas", { id: "grades", type: "grades", score: 0 }],
+    ["cuanto tengo", { id: "grades", type: "grades", score: 0 }],
+    ["que he sacado", { id: "grades", type: "grades", score: 0 }],
+    ["como voy en el curso", { id: "grades", type: "grades", score: 0 }],
+    ["como llevo las asignaturas", { id: "grades", type: "grades", score: 0 }],
+
+    // ── Tareas ──
+    ["tareas pendientes", { id: "assignments", type: "assignments", score: 0 }],
+    ["que tengo que entregar", { id: "assignments", type: "assignments", score: 0 }],
+    ["que tengo pendiente", { id: "assignments", type: "assignments", score: 0 }],
+    ["proximas entregas", { id: "assignments", type: "assignments", score: 0 }],
+    ["trabajos por hacer", { id: "assignments", type: "assignments", score: 0 }],
+    ["deberes", { id: "assignments", type: "assignments", score: 0 }],
+    ["que hay que hacer", { id: "assignments", type: "assignments", score: 0 }],
+    ["entregas pendientes", { id: "assignments", type: "assignments", score: 0 }],
+    ["que me falta por entregar", { id: "assignments", type: "assignments", score: 0 }],
+    ["tareas sin hacer", { id: "assignments", type: "assignments", score: 0 }],
+    ["actividades pendientes", { id: "assignments", type: "assignments", score: 0 }],
+    ["que tengo que hacer", { id: "assignments", type: "assignments", score: 0 }],
+    ["algo que entregar", { id: "assignments", type: "assignments", score: 0 }],
+    ["cosas por hacer", { id: "assignments", type: "assignments", score: 0 }],
+    ["practicas pendientes", { id: "assignments", type: "assignments", score: 0 }],
+
+    // ── Eventos / Exámenes ──
+    ["proximos examenes", { id: "events", type: "events", score: 0 }],
+    ["cuando es el examen", { id: "events", type: "events", score: 0 }],
+    ["fechas de examenes", { id: "events", type: "events", score: 0 }],
+    ["cuando tengo examen", { id: "events", type: "events", score: 0 }],
+    ["calendario de examenes", { id: "events", type: "events", score: 0 }],
+    ["cuando es el parcial", { id: "events", type: "events", score: 0 }],
+    ["cuando es el final", { id: "events", type: "events", score: 0 }],
+    ["proximos eventos", { id: "events", type: "events", score: 0 }],
+    ["agenda", { id: "events", type: "events", score: 0 }],
+
+    // ── Horario / Tiempo ──
+    ["que tengo hoy", { id: "overview_today", type: "overview", score: 0 }],
+    ["clases de hoy", { id: "overview_today", type: "overview", score: 0 }],
+    ["que toca hoy", { id: "overview_today", type: "overview", score: 0 }],
+    ["que tengo manana", { id: "overview_tomorrow", type: "overview", score: 0 }],
+    ["clases de manana", { id: "overview_tomorrow", type: "overview", score: 0 }],
+    ["que tengo esta semana", { id: "overview_week", type: "overview", score: 0 }],
+    ["horario semanal", { id: "overview_week", type: "overview", score: 0 }],
+    ["mi semana", { id: "overview_week", type: "overview", score: 0 }],
+
+    // ── Cursos ──
+    ["mis cursos", { id: "courses", type: "courses", score: 0 }],
+    ["mis asignaturas", { id: "courses", type: "courses", score: 0 }],
+    ["en que estoy matriculado", { id: "courses", type: "courses", score: 0 }],
+    ["que asignaturas tengo", { id: "courses", type: "courses", score: 0 }],
+    ["lista de cursos", { id: "courses", type: "courses", score: 0 }],
+
+    // ── Anuncios ──
+    ["anuncios", { id: "announcements", type: "announcements", score: 0 }],
+    ["ultimos anuncios", { id: "announcements", type: "announcements", score: 0 }],
+    ["avisos de profesores", { id: "announcements", type: "announcements", score: 0 }],
+    ["que hay de nuevo", { id: "announcements", type: "announcements", score: 0 }],
+    ["novedades", { id: "announcements", type: "announcements", score: 0 }],
+    ["ha dicho algo el profesor", { id: "announcements", type: "announcements", score: 0 }],
+    ["ha publicado algo el profesor", { id: "announcements", type: "announcements", score: 0 }],
+    ["ha subido algo el profesor", { id: "announcements", type: "announcements", score: 0 }],
+
+    // ── Archivos ──
+    ["archivos", { id: "files", type: "files", score: 0 }],
+    ["apuntes", { id: "files", type: "files", score: 0 }],
+    ["materiales", { id: "files", type: "files", score: 0 }],
+    ["documentos", { id: "files", type: "files", score: 0 }],
+    ["dame los apuntes", { id: "files", type: "files", score: 0 }],
+    ["pasame los archivos", { id: "files", type: "files", score: 0 }],
+
+    // ── Resumen / Overview ──
+    ["resumen", { id: "overview", type: "overview", score: 0 }],
+    ["ponme al dia", { id: "overview", type: "overview", score: 0 }],
+    ["como va todo", { id: "overview", type: "overview", score: 0 }],
+    ["que me espera", { id: "overview", type: "overview", score: 0 }],
+    ["vista general", { id: "overview", type: "overview", score: 0 }],
+    ["que hay", { id: "overview", type: "overview", score: 0 }],
+    ["que tengo", { id: "overview", type: "overview", score: 0 }],
+
+    // ── Ayuda ──
+    ["ayuda", { id: "help", type: "help", score: 0 }],
+    ["que puedes hacer", { id: "help", type: "help", score: 0 }],
+    ["como funciona esto", { id: "help", type: "help", score: 0 }],
+    ["que opciones tengo", { id: "help", type: "help", score: 0 }],
+    ["como te uso", { id: "help", type: "help", score: 0 }],
+
+    // ── Saludos ──
+    ["hola", { id: "greeting", type: "greeting", score: 0 }],
+    ["buenos dias", { id: "greeting", type: "greeting", score: 0 }],
+    ["buenas tardes", { id: "greeting", type: "greeting", score: 0 }],
+    ["buenas noches", { id: "greeting", type: "greeting", score: 0 }],
+    ["que tal", { id: "greeting", type: "greeting", score: 0 }],
+    ["como estas", { id: "greeting", type: "greeting", score: 0 }],
+
+    // ── Agradecimiento / Despedida ──
+    ["gracias", { id: "thanks", type: "thanks", score: 0 }],
+    ["muchas gracias", { id: "thanks", type: "thanks", score: 0 }],
+    ["vale gracias", { id: "thanks", type: "thanks", score: 0 }],
+    ["perfecto gracias", { id: "thanks", type: "thanks", score: 0 }],
+    ["adios", { id: "goodbye", type: "goodbye", score: 0 }],
+    ["hasta luego", { id: "goodbye", type: "goodbye", score: 0 }],
+    ["nos vemos", { id: "goodbye", type: "goodbye", score: 0 }],
+    ["chao", { id: "goodbye", type: "goodbye", score: 0 }],
+
+    // ── Cuenta ──
+    ["mi cuenta", { id: "link", type: "link", score: 0 }],
+    ["estoy vinculado", { id: "link", type: "link", score: 0 }],
+    ["estado de la cuenta", { id: "link", type: "link", score: 0 }],
+  ];
+
+  return entries.map(([phrase, intent]) => ({
+    norm: normalize(phrase),
+    intent,
+  }));
+}
+
+const FUZZY_THRESHOLD = 0.55;
+
+function detectIntentTier2(message: string): MatchedIntent | null {
+  const input = normalize(message);
+  if (input.length < 2) return null;
+
+  let best: { intent: MatchedIntent; score: number } | null = null;
+
+  for (const entry of FUZZY_CATALOG) {
+    const score = diceCoefficient(input, entry.norm);
+    if (score >= FUZZY_THRESHOLD && (!best || score > best.score)) {
+      best = {
+        intent: { ...entry.intent, score, courseHint: extractCourseHint(message) },
+        score,
+      };
+    }
+  }
+
+  return best ? best.intent : null;
+}
+
+// ── Text utilities ──
+
+/** Strip accents, punctuation, collapse whitespace */
+function normalize(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[¿?¡!.,;:()\"']/g, "") // strip punctuation
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** Dice coefficient for string similarity (0-1) */
+function diceCoefficient(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+
+  const bigramsA = new Set<string>();
+  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.substring(i, i + 2));
+
+  const bigramsB = new Set<string>();
+  for (let i = 0; i < b.length - 1; i++) bigramsB.add(b.substring(i, i + 2));
+
+  let intersection = 0;
+  for (const bg of bigramsA) {
+    if (bigramsB.has(bg)) intersection++;
+  }
+
+  return (2 * intersection) / (bigramsA.size + bigramsB.size);
 }
 
 function extractCourseHint(message: string): string | undefined {
-  const m = message.match(/\b(?:de|en)\s+([^,;:!?\n]+)/i);
+  const m = message.match(/\b(?:de|en|para)\s+([^,;:!?\n]+)/i);
   if (m) {
     let hint = m[1].trim();
     hint = hint.replace(/\b(por favor|please|gracias|pls)\b.*$/i, "").trim();
@@ -383,33 +617,36 @@ function formatDateMadrid(iso: string): string {
   });
 }
 
-// --- Intent dispatcher ---
+// ============================================
+// Intent dispatcher + handlers
+// ============================================
 
-async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotResponse> {
+async function handleIntent(intent: MatchedIntent, canvas: CanvasClient): Promise<BotResponse> {
   switch (intent.type) {
     case "greeting":
-      return { text: "👋 ¡Hola! ¿En qué puedo ayudarte hoy?\n\nEscribe **\"ayuda\"** para ver lo que puedo hacer.", resolvedBy: "system" };
+      return { text: "¡Hola! ¿En qué puedo ayudarte hoy?\n\nEscribe **\"ayuda\"** para ver lo que puedo hacer.", resolvedBy: "system" };
     case "thanks":
-      return { text: "😊 ¡De nada! Si necesitas algo más, aquí estoy.", resolvedBy: "system" };
+      return { text: randomPick(THANKS_RESPONSES), resolvedBy: "system" };
     case "goodbye":
-      return { text: "👋 ¡Hasta luego! Mucho ánimo con los estudios.", resolvedBy: "system" };
+      return { text: randomPick(GOODBYE_RESPONSES), resolvedBy: "system" };
     case "help":
       return {
         text:
-          "📋 **Puedo ayudarte con:**\n\n" +
+          "**Puedo ayudarte con:**\n\n" +
           '📚 **"Mis cursos"** — ver tus asignaturas\n' +
           '📊 **"Mis notas"** — consultar calificaciones\n' +
           '📝 **"Tareas pendientes"** — ver entregas próximas\n' +
           '📅 **"Eventos"** — consultar tu calendario\n' +
           '📢 **"Anuncios"** — ver noticias de tus cursos\n' +
           '📁 **"Archivos"** — ver materiales de tus cursos\n' +
-          '📋 **"Resumen"** — vista general de pendientes\n\n' +
+          '📋 **"Resumen"** — vista general de pendientes\n' +
+          '📅 **"Qué tengo hoy"** — agenda del día\n\n' +
           "También puedo responder preguntas más complejas sobre tus asignaturas.",
         resolvedBy: "system",
       };
     case "link":
       return {
-        text: "✅ Tu cuenta de Canvas ya está vinculada. Si necesitas actualizar tu token, ve a **Ajustes**.",
+        text: "Tu cuenta de Canvas ya está vinculada. Si necesitas actualizar tu token, ve a **Ajustes**.",
         resolvedBy: "system",
       };
     case "courses":
@@ -426,10 +663,28 @@ async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotRe
       return await handleFilesIntent(canvas, intent.courseHint);
     case "overview":
       return await handleOverviewIntent(canvas);
+    default:
+      return await handleOverviewIntent(canvas);
   }
 }
 
-// --- Canvas intent handlers ---
+const THANKS_RESPONSES = [
+  "¡De nada! Si necesitas algo más, aquí estoy.",
+  "¡Para eso estoy! No dudes en preguntarme lo que sea.",
+  "¡Un placer! Aquí me tienes si necesitas algo más.",
+];
+
+const GOODBYE_RESPONSES = [
+  "¡Hasta luego! Mucho ánimo con los estudios.",
+  "¡Nos vemos! Aquí estaré cuando me necesites.",
+  "¡Cuídate! Suerte con todo.",
+];
+
+function randomPick(arr: string[]): string {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// ── Canvas intent handlers ──
 
 async function handleCoursesIntent(canvas: CanvasClient): Promise<BotResponse> {
   const courses = await canvas.getCourses();
@@ -495,7 +750,6 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
   );
 
   const all = results.flat();
-  // Sort by due date (soonest first, null = no deadline at end)
   all.sort((a, b) => {
     if (!a.due_at && !b.due_at) return 0;
     if (!a.due_at) return 1;
@@ -504,7 +758,7 @@ async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string
   });
 
   if (all.length === 0) {
-    return { text: "✅ ¡No tienes tareas pendientes!", resolvedBy: "system" };
+    return { text: "¡No tienes tareas pendientes!", resolvedBy: "system" };
   }
 
   const shown = all.slice(0, 7);
@@ -603,7 +857,6 @@ async function handleFilesIntent(canvas: CanvasClient, courseHint?: string): Pro
     }
   }
 
-  // No hint or no match — list courses to choose
   const options = courses.map((c) => `📚 **${c.name}**`);
   return {
     text: `📁 ¿De qué curso quieres ver los archivos?\n\n${options.join("\n")}`,
@@ -614,7 +867,6 @@ async function handleFilesIntent(canvas: CanvasClient, courseHint?: string): Pro
 async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> {
   const courses = await canvas.getCourses();
 
-  // Fetch pending assignments and events in parallel
   const [assignmentResults, events] = await Promise.all([
     Promise.all(
       courses.map(async (c) => {
@@ -639,9 +891,8 @@ async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> 
 
   const parts: string[] = [];
 
-  // Pending assignments summary
   if (pending.length === 0) {
-    parts.push("✅ **Tareas:** No tienes tareas pendientes.");
+    parts.push("📝 **Tareas:** No tienes tareas pendientes.");
   } else {
     const top = pending.slice(0, 3);
     const lines = top.map((a) => {
@@ -654,7 +905,6 @@ async function handleOverviewIntent(canvas: CanvasClient): Promise<BotResponse> 
     }
   }
 
-  // Upcoming events summary
   if (events.length === 0) {
     parts.push("📅 **Eventos:** No hay eventos próximos.");
   } else {

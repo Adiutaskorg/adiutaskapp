@@ -8,6 +8,7 @@ import type { WSClientMessage, WSServerMessage, ChatMessage, ResponseType } from
 import { WS_CLOSE_CODES } from "@shared/constants";
 import { verifyJWTToken } from "../middleware/auth.middleware";
 import { processMessage } from "../services/bot.engine";
+import { saveChatMessage } from "../db/database";
 
 /** Data attached to each WebSocket connection */
 interface WSData {
@@ -99,6 +100,11 @@ export const websocketHandler = {
           };
 
           send(ws, { type: "chat_response", message });
+
+          // Persist both user message and bot response to database
+          saveChatMessage(userId, "user", data.payload.trim()).catch(() => {});
+          saveChatMessage(userId, "bot", botResponse.text, botResponse.responseType, botResponse.metadata).catch(() => {});
+
           break;
         }
 

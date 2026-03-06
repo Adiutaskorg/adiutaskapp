@@ -5,7 +5,7 @@
 
 import { CanvasClient } from "@adiutask/core";
 import type { Assignment } from "@adiutask/core";
-import { getUserCanvasToken } from "../db/database";
+import { getUserCanvasToken, getRoutingStats } from "../db/database";
 
 const CANVAS_BASE_URL = process.env.CANVAS_BASE_URL || "https://ufv-es.instructure.com";
 
@@ -70,6 +70,19 @@ export async function dashboardRoutes(
   url: URL,
   userId: string
 ): Promise<Response> {
+  // Routing stats endpoint (admin-only via query param)
+  if (url.pathname === "/api/dashboard/routing-stats") {
+    const days = Number(url.searchParams.get("days")) || 1;
+    const stats = getRoutingStats(days);
+    const total = stats.total || 1;
+    return json({
+      ...stats,
+      byTierPercent: Object.fromEntries(
+        Object.entries(stats.byTier).map(([k, v]) => [k, `${((v / total) * 100).toFixed(1)}%`]),
+      ),
+    });
+  }
+
   if (req.method !== "GET") {
     return json({ error: "Metodo no permitido" }, 405);
   }

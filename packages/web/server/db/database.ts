@@ -91,6 +91,23 @@ export async function initDatabase(): Promise<void> {
     ON sent_notifications(user_id, type, reference_id)
   `);
 
+  // Routing metrics — tracks which tier resolves each message
+  db.run(`
+    CREATE TABLE IF NOT EXISTS routing_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+      tier TEXT NOT NULL,
+      intent_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      message_length INTEGER NOT NULL,
+      processing_time_ms INTEGER NOT NULL,
+      message_text TEXT
+    )
+  `);
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_routing_tier ON routing_metrics(tier)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_routing_ts ON routing_metrics(timestamp)`);
+
   console.log("📦 Database initialized");
 }
 
@@ -284,4 +301,72 @@ export function getUsersWithPushSubscriptions(): Array<{
 /** Delete a push subscription by user ID (used when subscription expires) */
 export function deletePushSubscriptionSync(userId: string): void {
   db.run("DELETE FROM push_subscriptions WHERE user_id = ?", [userId]);
+}
+
+// ── Routing metrics ──
+
+/** Record a routing decision */
+export function recordRouting(
+  tier: string,
+  intentId: string,
+  userId: string,
+  messageLength: number,
+  processingTimeMs: number,
+  messageText?: string,
+): void {
+  db.run(
+    `INSERT INTO routing_metrics (tier, intent_id, user_id, message_length, processing_time_ms, message_text)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [tier, intentId, userId, messageLength, processingTimeMs, messageText ?? null],
+  );
+}
+
+/** Get routing stats for a time period */
+export function getRoutingStats(days = 1): {
+  total: number;
+  byTier: Record<string, number>;
+  topIntents: { intent_id: string; tier: string; count: number }[];
+  tier3Queries: { message_text: string; count: number }[];
+} {
+  const since = `-${days} days`;
+
+  const tierRows = db
+    .query<{ tier: string; cnt: number }, [string]>(
+      `SELECT tier, COUNT(*) as cnt FROM routing_metrics
+       WHERE timestamp > datetime('now', ?) GROUP BY tier`,
+    )
+    .all(since);
+
+  const byTier: Record<string, number> = {};
+  let total = 0;
+  for (const r of tierRows) {
+    byTier[r.tier] = r.cnt;
+    total += r.cnt;
+  }
+
+  const topIntents = db
+    .query<{ intent_id: string; tier: string; count: number }, [string]>(
+      `SELECT intent_id, tier, COUNT(*) as count FROM routing_metrics
+       WHERE timestamp > datetime('now', ?) GROUP BY intent_id, tier
+       ORDER BY count DESC LIMIT 20`,
+    )
+    .all(since);
+
+  const tier3Queries = db
+    .query<{ message_text: string; count: number }, [string]>(
+      `SELECT message_text, COUNT(*) as count FROM routing_metrics
+       WHERE tier = 'tier3' AND message_text IS NOT NULL AND timestamp > datetime('now', ?)
+       GROUP BY message_text ORDER BY count DESC LIMIT 30`,
+    )
+    .all(since);
+
+  return { total, byTier, topIntents, tier3Queries };
+}
+
+/** Prune old routing metrics */
+export function pruneOldMetrics(days = 30): void {
+  db.run(
+    `DELETE FROM routing_metrics WHERE timestamp < datetime('now', '-' || ? || ' days')`,
+    [days],
+  );
 }
