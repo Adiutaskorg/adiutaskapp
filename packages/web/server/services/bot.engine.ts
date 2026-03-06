@@ -1,11 +1,13 @@
 // ============================================
-// Bot Engine — LLM-first architecture
-// All messages go directly through the LLM
+// Bot Engine — Intent-first architecture
+// Common queries resolved via Canvas API directly
+// LLM used only as fallback for complex queries
 // ============================================
 
 import {
   CanvasClient, TokenExpiredError,
   createLLMProvider, type LLMProvider, type CollectedFile,
+  type Course,
 } from "@adiutask/core";
 import { ConversationStore } from "./conversation";
 import { getUserCanvasToken, saveCanvasToken } from "../db/database";
@@ -108,7 +110,7 @@ function buildFileInfos(files: CollectedFile[]): FileInfo[] {
 }
 
 /**
- * Process a user message — all queries go through the LLM.
+ * Process a user message — intent routing first, LLM as fallback.
  */
 export async function processMessage(userId: string, message: string): Promise<BotResponse> {
   const trimmed = message.trim();
@@ -143,6 +145,29 @@ export async function processMessage(userId: string, message: string): Promise<B
   if (!canvas) {
     canvas = new CanvasClient(CANVAS_BASE_URL, canvasToken);
     canvasClients.set(userId, canvas);
+  }
+
+  // --- Intent-based routing (skip LLM for common queries) ---
+  const intent = detectIntent(trimmed);
+  if (intent) {
+    try {
+      console.log(`[BOT] Intent: ${intent.type} (direct, no LLM)`);
+      const directResponse = await handleIntent(intent, canvas);
+      conversation.addMessage(userId, "user", message);
+      conversation.addMessage(userId, "assistant", directResponse.text);
+      return directResponse;
+    } catch (err) {
+      if (err instanceof TokenExpiredError) {
+        canvasClients.delete(userId);
+        return {
+          text: "Tu token de Canvas ha expirado o no es válido. Renuévalo en Canvas (Perfil > Configuración > Tokens de acceso) y escribe **\"vincular\"** para actualizarlo.",
+          resolvedBy: "system",
+          responseType: "error",
+        };
+      }
+      // Non-fatal: fall through to LLM
+      console.log(`[BOT] Intent handler failed, falling back to LLM: ${(err as Error).message}`);
+    }
   }
 
   const history = conversation.getHistory(userId);
@@ -261,4 +286,268 @@ async function handleTokenValidation(userId: string, token: string): Promise<Bot
       responseType: "error",
     };
   }
+}
+
+// ============================================
+// Intent-based routing — resolves common
+// queries directly via Canvas APIs (no LLM)
+// ============================================
+
+type Intent =
+  | { type: "greeting" }
+  | { type: "thanks" }
+  | { type: "goodbye" }
+  | { type: "help" }
+  | { type: "link" }
+  | { type: "courses" }
+  | { type: "grades"; courseHint?: string }
+  | { type: "assignments"; courseHint?: string }
+  | { type: "events" }
+  | { type: "announcements" };
+
+// --- Regex patterns ---
+
+const COURSES_RE = /\b(mis\s*cursos|asignaturas|materias|qu[eé]\s*cursos\s*(tengo|hay))\b/i;
+const GRADES_RE = /\b(mis\s*notas|calificaciones?|nota[s]?|qu[eé]\s*(nota|calificaci[oó]n)|c[oó]mo\s*voy)\b/i;
+const ASSIGNMENTS_RE = /\b(tareas?\s*(pendientes?)?|deberes|entregas?\s*(pendientes?)?|pr[aá]cticas?\s*(pendientes?)?|qu[eé]\s*(tengo|hay)\s*(que\s*entregar|pendiente))\b/i;
+const EVENTS_RE = /\b(eventos?|calendario|ex[aá]me(n|nes)|agenda|pr[oó]xim(o|a|os|as)\s*(eventos?|entregas?))\b/i;
+const ANNOUNCEMENTS_RE = /\b(anuncios?|avisos?|noticias?|novedades?)\b/i;
+const LINK_RE = /\b(vincular|conectar|enlazar|token)\b/i;
+const GREETING_RE = /^(hola|hey|buenas|buenos?\s*(d[ií]as?|tardes?|noches?)|qu[eé]\s*tal|saludos|hi|hello)\b/i;
+const THANKS_RE = /^(gracias|thanks?|genial|perfecto|guay|vale|ok[i]?|de\s*acuerdo|entendido|claro)\b/i;
+const GOODBYE_RE = /^(adi[oó]s|chao|bye|hasta\s*(luego|ma[nñ]ana|pronto)|nos\s*vemos)\b/i;
+const HELP_RE = /\b(ayuda|help|qu[eé]\s*puedes\s*(hacer|decir))\b/i;
+
+function detectIntent(message: string): Intent | null {
+  const m = message.toLowerCase().trim();
+
+  // Canvas intents first (match anywhere in message)
+  if (COURSES_RE.test(m)) return { type: "courses" };
+  if (GRADES_RE.test(m)) return { type: "grades", courseHint: extractCourseHint(m) };
+  if (ASSIGNMENTS_RE.test(m)) return { type: "assignments", courseHint: extractCourseHint(m) };
+  if (EVENTS_RE.test(m)) return { type: "events" };
+  if (ANNOUNCEMENTS_RE.test(m)) return { type: "announcements" };
+  if (LINK_RE.test(m)) return { type: "link" };
+
+  // Chitchat (short messages only to avoid false positives)
+  if (m.length <= 60) {
+    if (GREETING_RE.test(m)) return { type: "greeting" };
+    if (THANKS_RE.test(m)) return { type: "thanks" };
+    if (GOODBYE_RE.test(m)) return { type: "goodbye" };
+  }
+
+  if (HELP_RE.test(m)) return { type: "help" };
+
+  return null; // → LLM fallback
+}
+
+function extractCourseHint(message: string): string | undefined {
+  const m = message.match(/\b(?:de|en)\s+([^,;:!?\n]+)/i);
+  if (m) {
+    let hint = m[1].trim();
+    hint = hint.replace(/\b(por favor|please|gracias|pls)\b.*$/i, "").trim();
+    if (hint.length > 2) return hint;
+  }
+  return undefined;
+}
+
+function matchCourses(courses: Course[], hint: string): Course[] {
+  const h = hint.toLowerCase();
+  return courses.filter(
+    (c) => c.name.toLowerCase().includes(h) || c.course_code.toLowerCase().includes(h),
+  );
+}
+
+function formatDateMadrid(iso: string): string {
+  return new Date(iso).toLocaleString("es-ES", {
+    timeZone: "Europe/Madrid",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// --- Intent dispatcher ---
+
+async function handleIntent(intent: Intent, canvas: CanvasClient): Promise<BotResponse> {
+  switch (intent.type) {
+    case "greeting":
+      return { text: "👋 ¡Hola! ¿En qué puedo ayudarte hoy?", resolvedBy: "system" };
+    case "thanks":
+      return { text: "😊 ¡De nada! Si necesitas algo más, aquí estoy.", resolvedBy: "system" };
+    case "goodbye":
+      return { text: "👋 ¡Hasta luego! Mucho ánimo con los estudios.", resolvedBy: "system" };
+    case "help":
+      return {
+        text:
+          "📋 **Puedo ayudarte con:**\n\n" +
+          '📚 **"Mis cursos"** — ver tus asignaturas\n' +
+          '📊 **"Mis notas"** — consultar calificaciones\n' +
+          '📝 **"Tareas pendientes"** — ver entregas próximas\n' +
+          '📅 **"Eventos"** — consultar tu calendario\n' +
+          '📢 **"Anuncios"** — ver noticias de tus cursos\n\n' +
+          "También puedo responder preguntas más complejas sobre tus asignaturas.",
+        resolvedBy: "system",
+      };
+    case "link":
+      return {
+        text: "✅ Tu cuenta de Canvas ya está vinculada. Si necesitas actualizar tu token, ve a **Ajustes**.",
+        resolvedBy: "system",
+      };
+    case "courses":
+      return await handleCoursesIntent(canvas);
+    case "grades":
+      return await handleGradesIntent(canvas, intent.courseHint);
+    case "assignments":
+      return await handleAssignmentsIntent(canvas, intent.courseHint);
+    case "events":
+      return await handleEventsIntent(canvas);
+    case "announcements":
+      return await handleAnnouncementsIntent(canvas);
+  }
+}
+
+// --- Canvas intent handlers ---
+
+async function handleCoursesIntent(canvas: CanvasClient): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+  if (courses.length === 0) {
+    return { text: "No tienes cursos activos en Canvas.", resolvedBy: "system" };
+  }
+  const lines = courses.map((c) => `📚 **${c.name}** (${c.course_code})`);
+  return {
+    text: `Tienes **${courses.length} curso${courses.length !== 1 ? "s" : ""} activo${courses.length !== 1 ? "s" : ""}**:\n\n${lines.join("\n")}`,
+    resolvedBy: "system",
+  };
+}
+
+async function handleGradesIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+  let targets = courses;
+  if (courseHint) {
+    const matched = matchCourses(courses, courseHint);
+    if (matched.length > 0) targets = matched;
+  }
+
+  const results = await Promise.all(
+    targets.map(async (c) => {
+      try {
+        return { course: c, grades: await canvas.getGrades(c.id) };
+      } catch {
+        return { course: c, grades: null };
+      }
+    }),
+  );
+
+  const lines = results.map(({ course, grades }) => {
+    if (!grades || grades.current_score === null) {
+      return `📚 **${course.name}**: Sin calificación aún`;
+    }
+    const nota = (grades.current_score / 10).toFixed(1);
+    return `📚 **${course.name}**: **${nota} / 10**`;
+  });
+
+  return {
+    text: `📊 **Tus calificaciones:**\n\n${lines.join("\n")}`,
+    resolvedBy: "system",
+  };
+}
+
+async function handleAssignmentsIntent(canvas: CanvasClient, courseHint?: string): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+  let targets = courses;
+  if (courseHint) {
+    const matched = matchCourses(courses, courseHint);
+    if (matched.length > 0) targets = matched;
+  }
+
+  const results = await Promise.all(
+    targets.map(async (c) => {
+      try {
+        const assignments = await canvas.getAssignments(c.id, true);
+        return assignments.map((a) => ({ ...a, courseName: c.name }));
+      } catch {
+        return [];
+      }
+    }),
+  );
+
+  const all = results.flat();
+  // Sort by due date (soonest first, null = no deadline at end)
+  all.sort((a, b) => {
+    if (!a.due_at && !b.due_at) return 0;
+    if (!a.due_at) return 1;
+    if (!b.due_at) return -1;
+    return new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+  });
+
+  if (all.length === 0) {
+    return { text: "✅ ¡No tienes tareas pendientes!", resolvedBy: "system" };
+  }
+
+  const shown = all.slice(0, 7);
+  const lines = shown.map((a) => {
+    const date = a.due_at ? formatDateMadrid(a.due_at) : "sin fecha límite";
+    return `📝 **${a.name}** (${a.courseName})\n   Entrega: ${date}`;
+  });
+
+  let text = `📝 **Tareas pendientes (${all.length}):**\n\n${lines.join("\n\n")}`;
+  if (all.length > 7) {
+    text += `\n\n...y ${all.length - 7} más. Pregúntame por un curso específico para ver todas.`;
+  }
+
+  return { text, resolvedBy: "system" };
+}
+
+async function handleEventsIntent(canvas: CanvasClient): Promise<BotResponse> {
+  const events = await canvas.getUpcomingEvents();
+
+  if (events.length === 0) {
+    return { text: "📅 No tienes eventos próximos en tu calendario de Canvas.", resolvedBy: "system" };
+  }
+
+  const shown = events.slice(0, 7);
+  const lines = shown.map((e) => {
+    const date = e.start_at ? formatDateMadrid(e.start_at) : "sin fecha";
+    const course = e.course_name ? ` (${e.course_name})` : "";
+    return `📅 **${e.title}**${course}\n   ${date}`;
+  });
+
+  let text = `📅 **Próximos eventos (${events.length}):**\n\n${lines.join("\n\n")}`;
+  if (events.length > 7) {
+    text += `\n\n...y ${events.length - 7} más.`;
+  }
+
+  return { text, resolvedBy: "system" };
+}
+
+async function handleAnnouncementsIntent(canvas: CanvasClient): Promise<BotResponse> {
+  const courses = await canvas.getCourses();
+  const courseIds = courses.map((c) => c.id);
+
+  if (courseIds.length === 0) {
+    return { text: "No tienes cursos activos para consultar anuncios.", resolvedBy: "system" };
+  }
+
+  const announcements = await canvas.getAnnouncements(courseIds);
+
+  if (announcements.length === 0) {
+    return { text: "📢 No hay anuncios recientes en tus cursos.", resolvedBy: "system" };
+  }
+
+  const shown = announcements.slice(0, 5);
+  const lines = shown.map((a) => {
+    const date = a.posted_at ? formatDateMadrid(a.posted_at) : "";
+    const link = a.url ? ` [Ver](${a.url})` : "";
+    return `📢 **${a.title}**\n   ${date}${link}`;
+  });
+
+  let text = `📢 **Anuncios recientes:**\n\n${lines.join("\n\n")}`;
+  if (announcements.length > 5) {
+    text += `\n\n...y ${announcements.length - 5} más.`;
+  }
+
+  return { text, resolvedBy: "system" };
 }
